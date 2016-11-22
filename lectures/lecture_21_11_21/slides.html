@@ -1,0 +1,2327 @@
+<!doctype html>
+<html>
+<meta charset="utf-8">
+<head>
+<style>
+  slide-tile {
+    display:block;
+    padding: 2em;
+  }
+
+  slide-show {
+    padding: 2em;
+  }
+  neon-animated-pages {
+    height: 0 !important;
+  }
+</style>
+   <script> (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+var VNode = require('vtree/vnode');
+var svg = require('virtual-hyperscript/svg');
+var VText = require('vtree/vtext');
+var VPatch = require('vtree/vpatch');
+var diff = require('virtual-dom/diff');
+var patch = require('virtual-dom/patch');
+var createElement = require('virtual-dom/create-element');
+var nodeIndex = require('./node-index');
+var patchVNode = require('./patch-vnode');
+var isArray = require('x-is-array');
+var isVPatch = require('./is-vpatch');
+
+var P = Patchwork = {
+    nodes: {},
+    debug: false,
+    Node: function (id, jlNode, el, renderOpts) {
+        if (typeof(el) === "undefined") {
+            el = document.getElementById(id)
+        }
+        this.id = id
+        this.renderOptions = renderOpts
+        if (jlNode) {
+            // Note: makes this.root
+            var vnode = P.makeVNode(jlNode)
+            P.log("makeVNode: ", jlNode, "=>", vnode)
+            this.mount(vnode, el, renderOpts)
+        }
+        P.nodes[id] = this
+    },
+    NAMESPACES: {
+        "xhtml": null,
+        "svg": "http://www.w3.org/2000/svg",
+        null: null,
+        undefined: null
+    },
+    refDiff: function (a, b, p) {
+        var a = P.makeVNode(a)
+            b = P.makeVNode(b)
+            p = P.makeVPatches(a, p)
+        console.log(p, diff(a, b));
+    },
+    massageProps: function (props) {
+        if ("attributes" in props) {
+            // we can't send undefined over JSON, so we turn nulls into undefs
+            // so that VDom calls removeAttribute on the DOM node.
+            //console.log("attributes ", props.attributes)
+            for (var attr in props.attributes) {
+                if (!props.attributes.hasOwnProperty(attr)) {
+                    continue
+                }
+                if (props.attributes[attr] === null) {
+                //console.log("remove ", attr, props.attributes[attr]);
+                    props.attributes[attr] = undefined
+                }
+            }
+        }
+        return P.setupHooks(props);
+    },
+    hooks: {},
+    register_hook: function (hook, f) {
+        P.hooks[hook] = f;
+    },
+    setupHooks: function (props) {
+        if (typeof props !== "object" || props == null) {
+            return props;
+        } else if (props && "_hook" in props) {
+            if (props._hook in P.hooks) {
+                v = P.hooks[props._hook](P.setupHooks(props.val));
+                return v
+            } else {
+                console.warn("Unknown hook " + props._hook + "use Patchwork.register_hook to set it up")
+                return undefined
+            }
+        } else {
+            for (var k in props) {
+                props[k] = P.setupHooks(props[k]);
+            }
+            return props;
+        }
+    },
+    makeVNode: function (jlNode) {
+        if ('txt' in jlNode) return new VText(jlNode.txt);
+        var children = [],
+            props = P.massageProps(jlNode.p || {})
+
+        if (jlNode.c) {
+            for (var i = 0, l = jlNode.c.length; i < l; i++) {
+                children[i] = P.makeVNode(jlNode.c[i])
+            }
+        }
+
+        if (jlNode.n === "svg") {
+            return svg(jlNode.t, props, children)
+        } else {
+            var key = null
+            if (props && props.key) {
+                key = props.key
+                delete props.key
+            }
+            return new VNode(jlNode.t,
+                             props,
+                             children,
+                             key,
+                             P.NAMESPACES[jlNode.n]);
+        }
+    },
+    makeVPatches: function (root, jlPatches) {
+        var indices = [];
+        var vpatches = {a: root}
+        for (var idx in jlPatches) {
+            if (!jlPatches.hasOwnProperty(idx)) {
+                continue
+            }
+            indices.push(Number(idx))
+        }
+        nodes = nodeIndex(root, indices)
+
+        for (var idx in jlPatches) {
+            vpatches[idx] = P.makeVPatch(nodes[idx], jlPatches[idx]);
+        }
+        return vpatches
+    },
+    makeVPatch: function (vnode, jlPatch) {
+        if (isArray(jlPatch)) {
+            // multiple patches to the same VNode
+            var ps = [];
+            for (var i=0, l=jlPatch.length; i < l; i++) {
+                ps[i] = P.makeVPatch(vnode, jlPatch[i])
+            }
+            return ps
+        }
+
+        var type, patch;
+        for (var k in jlPatch) {
+            type = k;
+            patch = jlPatch[k];
+            break; // inorite?
+        }
+
+        function vpatch(p) { return new VPatch(type, vnode, p); }
+
+        switch (Number(type)) {
+        case VPatch.VTEXT:
+            return vpatch(new VText(patch));
+        case VPatch.VNODE:
+            return vpatch(P.makeVNode(patch));
+        case VPatch.PROPS:
+            patch = P.massageProps(patch)
+            if (vnode.namespace === P.NAMESPACES["svg"]) {
+                patch = svg('dummy', patch, []).properties
+            }
+            return vpatch(patch);
+        case VPatch.ORDER:
+            return vpatch(patch);
+        case VPatch.INSERT:
+            return vpatch(P.makeVNode(patch));
+        case VPatch.REMOVE:
+            return vpatch(null);
+        default:
+            return null;
+        }
+    },
+    log: function () {
+        if (console && P.debug) {
+            console.log.apply(console, arguments);
+        }
+    }
+}
+
+Patchwork.Node.prototype = {
+    mount: function (vnode, outer, renderOpts) {
+        var el = createElement(vnode, renderOpts);
+        P.log("createElement: ", vnode, "=>", el)
+        outer.appendChild(el)
+        this.element = el
+        this.root = vnode;
+        return el;
+    },
+    applyPatch: function (vpatches) {
+        // apply patch to DOM nodes
+        if (!isVPatch(vpatches)) {
+            vpatches = P.makeVPatches(this.root, vpatches)
+        }
+        this.element = patch(this.element, vpatches, this.renderOptions)
+        this.root = patchVNode(this.root, vpatches)
+    }
+}
+
+function init(nb, cue) {
+    if (!Patchwork.inited) {
+        try {
+            console.log("attempting Patchwork setup, cue:", cue)
+            var commMgr =  nb.kernel.comm_manager;
+            commMgr.register_target("PatchStream", function (comm, msg) {
+                var nodeId = msg.content.data.pwid;
+                comm.on_msg(function (msg) {
+                    var node = P.nodes[nodeId],
+                        patches = msg.content.data
+                    node.applyPatch(patches)
+                    P.log("received patches", patches)
+                });
+            });
+            Patchwork.inited = true;
+        } catch (e) {
+            Patchwork.inited = false;
+            console.log("ERROR initializing patchwork: ", e);
+            console.log("attempting failed, cue:", cue)
+        }
+    }
+}
+
+// IJulia setup
+if (typeof(window.IPython) !== "undefined") {
+    init(IPython.notebook, "immediate");
+    $(document).ready(function () { init(IPython.notebook, "document ready"); });
+    $([IPython.events]).on("kernel_ready.Kernel kernel_created.Kernel", function (evt, nb) {
+        init(nb, "kernel start")
+    })
+}
+
+window.Patchwork = Patchwork;
+
+},{"./is-vpatch":2,"./node-index":3,"./patch-vnode":58,"virtual-dom/create-element":5,"virtual-dom/diff":6,"virtual-dom/patch":23,"virtual-hyperscript/svg":47,"vtree/vnode":53,"vtree/vpatch":54,"vtree/vtext":55,"x-is-array":56}],2:[function(require,module,exports){
+var version = require("vtree/version")
+
+module.exports = isVirtualPatch
+
+function isVirtualPatch(x) {
+    return x && x.type === "VirtualPatch" && x.version === version
+}
+
+},{"vtree/version":52}],3:[function(require,module,exports){
+module.exports = nodeIndex
+
+function nodeIndex(tree, indices, nodes) {
+    if (!indices || indices.length === 0) {
+        return {}
+    } else {
+        indices.sort(ascending)
+        return recurse(tree, indices, nodes, 0)
+    }
+}
+
+function recurse(tree, indices, nodes, rootIndex) {
+    nodes = nodes || {}
+
+
+    if (tree) {
+        if (indexInRange(indices, rootIndex, rootIndex)) {
+            nodes[rootIndex] = tree
+        }
+
+        var vChildren = tree.children
+
+        if (vChildren) {
+
+            for (var i = 0; i < vChildren.length; i++) {
+                rootIndex += 1
+
+                var vChild = vChildren[i]
+                var nextIndex = rootIndex + (vChild.count || 0)
+
+                // skip recursion down the tree if there are no nodes down here
+                if (indexInRange(indices, rootIndex, nextIndex)) {
+                    recurse(vChild, indices, nodes, rootIndex)
+                }
+
+                rootIndex = nextIndex
+            }
+        }
+    } else {
+        rootIndex
+    }
+
+    return nodes
+}
+
+// Binary search for an index in the interval [left, right]
+function indexInRange(indices, left, right) {
+    if (indices.length === 0) {
+        return false
+    }
+
+    var minIndex = 0
+    var maxIndex = indices.length - 1
+    var currentIndex
+    var currentItem
+
+    while (minIndex <= maxIndex) {
+        currentIndex = ((maxIndex + minIndex) / 2) >> 0
+        currentItem = indices[currentIndex]
+
+        if (minIndex === maxIndex) {
+            return currentItem >= left && currentItem <= right
+        } else if (currentItem < left) {
+            minIndex = currentIndex + 1
+        } else  if (currentItem > right) {
+            maxIndex = currentIndex - 1
+        } else {
+            return true
+        }
+    }
+
+    return false;
+}
+
+function ascending(a, b) {
+    return a > b ? 1 : -1
+}
+
+},{}],4:[function(require,module,exports){
+module.exports = isObject
+
+function isObject(x) {
+    return typeof x === "object" && x !== null
+}
+
+},{}],5:[function(require,module,exports){
+var createElement = require("vdom/create-element")
+
+module.exports = createElement
+
+},{"vdom/create-element":8}],6:[function(require,module,exports){
+var diff = require("vtree/diff")
+
+module.exports = diff
+
+},{"vtree/diff":14}],7:[function(require,module,exports){
+var isObject = require("is-object")
+var isHook = require("vtree/is-vhook")
+
+module.exports = applyProperties
+
+function applyProperties(node, props, previous, renderOptions) {
+    var domNode = renderOptions && renderOptions.extractNode ?
+            renderOptions.extractNode(node) : node
+
+    for (var propName in props) {
+        var propValue = props[propName]
+
+        if (propValue === undefined) {
+            removeProperty(domNode, props, previous, propName);
+        } else if (isHook(propValue)) {
+            propValue.hook(domNode,
+                propName,
+                previous ? previous[propName] : undefined)
+        } else {
+            if (isObject(propValue)) {
+                patchObject(domNode, props, previous, propName, propValue);
+            } else if (propValue !== undefined) {
+                domNode[propName] = propValue
+            }
+        }
+    }
+}
+
+function removeProperty(node, props, previous, propName) {
+    if (previous) {
+        var previousValue = previous[propName]
+
+        if (!isHook(previousValue)) {
+            if (propName === "attributes") {
+                for (var attrName in previousValue) {
+                    node.removeAttribute(attrName)
+                }
+            } else if (propName === "style") {
+                for (var i in previousValue) {
+                    node.style[i] = ""
+                }
+            } else if (typeof previousValue === "string") {
+                node[propName] = ""
+            } else {
+                node[propName] = null
+            }
+        }
+    }
+}
+
+function patchObject(node, props, previous, propName, propValue) {
+    var previousValue = previous ? previous[propName] : undefined
+
+    // Set attributes
+    if (propName === "attributes") {
+        for (var attrName in propValue) {
+            var attrValue = propValue[attrName]
+
+            if (attrValue === undefined) {
+                node.removeAttribute(attrName)
+            } else {
+                node.setAttribute(attrName, attrValue)
+            }
+        }
+
+        return
+    }
+
+    if(previousValue && isObject(previousValue) &&
+        getPrototype(previousValue) !== getPrototype(propValue)) {
+        node[propName] = propValue
+        return
+    }
+
+    if (!isObject(node[propName])) {
+        node[propName] = {}
+    }
+
+    var replacer = propName === "style" ? "" : undefined
+
+    for (var k in propValue) {
+        var value = propValue[k]
+        node[propName][k] = (value === undefined) ? replacer : value
+    }
+}
+
+function getPrototype(value) {
+    if (Object.getPrototypeOf) {
+        return Object.getPrototypeOf(value)
+    } else if (value.__proto__) {
+        return value.__proto__
+    } else if (value.constructor) {
+        return value.constructor.prototype
+    }
+}
+
+},{"is-object":4,"vtree/is-vhook":17}],8:[function(require,module,exports){
+var document = require("global/document")
+
+var applyProperties = require("./apply-properties")
+
+var isVNode = require("vtree/is-vnode")
+var isVText = require("vtree/is-vtext")
+var isWidget = require("vtree/is-widget")
+var handleThunk = require("vtree/handle-thunk")
+
+module.exports = createElement
+
+function id(x) { return x }
+
+function createElement(vnode, opts) {
+
+    var doc = opts ? opts.document || document : document
+    var warn = opts ? opts.warn : null
+
+    vnode = handleThunk(vnode).a
+
+    if (isWidget(vnode)) {
+        return vnode.init()
+    } else if (isVText(vnode)) {
+        return doc.createTextNode(vnode.text)
+    } else if (!isVNode(vnode)) {
+        if (warn) {
+            warn("Item is not a valid virtual dom node", vnode)
+        }
+        return null
+    }
+
+    var node = (vnode.namespace === null) ?
+        doc.createElement(vnode.tagName, vnode.properties.is) :
+        doc.createElementNS(vnode.namespace, vnode.tagName)
+
+    var props = vnode.properties
+    applyProperties(node, props, null, opts)
+
+    var children = vnode.children
+
+    for (var i = 0; i < children.length; i++) {
+        var childNode = createElement(children[i], opts)
+        if (childNode) {
+            node.appendChild(childNode)
+        }
+    }
+
+    return node
+}
+
+},{"./apply-properties":7,"global/document":10,"vtree/handle-thunk":15,"vtree/is-vnode":18,"vtree/is-vtext":19,"vtree/is-widget":20}],9:[function(require,module,exports){
+// Maps a virtual DOM tree onto a real DOM tree in an efficient manner.
+// We don't want to read all of the DOM nodes in the tree so we use
+// the in-order tree indexing to eliminate recursion down certain branches.
+// We only recurse into a DOM node if we know that it contains a child of
+// interest.
+
+var noChild = {}
+
+module.exports = domIndex
+
+function domIndex(rootNode, tree, indices, nodes) {
+    if (!indices || indices.length === 0) {
+        return {}
+    } else {
+        indices.sort(ascending)
+        return recurse(rootNode, tree, indices, nodes, 0)
+    }
+}
+
+function recurse(rootNode, tree, indices, nodes, rootIndex) {
+    nodes = nodes || {}
+
+
+    if (rootNode) {
+        if (indexInRange(indices, rootIndex, rootIndex)) {
+            nodes[rootIndex] = rootNode
+        }
+
+        var vChildren = tree.children
+
+        if (vChildren) {
+
+            var childNodes = rootNode.childNodes
+
+            for (var i = 0; i < tree.children.length; i++) {
+                rootIndex += 1
+
+                var vChild = vChildren[i] || noChild
+                var nextIndex = rootIndex + (vChild.count || 0)
+
+                // skip recursion down the tree if there are no nodes down here
+                if (indexInRange(indices, rootIndex, nextIndex)) {
+                    recurse(childNodes[i], vChild, indices, nodes, rootIndex)
+                }
+
+                rootIndex = nextIndex
+            }
+        }
+    }
+
+    return nodes
+}
+
+// Binary search for an index in the interval [left, right]
+function indexInRange(indices, left, right) {
+    if (indices.length === 0) {
+        return false
+    }
+
+    var minIndex = 0
+    var maxIndex = indices.length - 1
+    var currentIndex
+    var currentItem
+
+    while (minIndex <= maxIndex) {
+        currentIndex = ((maxIndex + minIndex) / 2) >> 0
+        currentItem = indices[currentIndex]
+
+        if (minIndex === maxIndex) {
+            return currentItem >= left && currentItem <= right
+        } else if (currentItem < left) {
+            minIndex = currentIndex + 1
+        } else  if (currentItem > right) {
+            maxIndex = currentIndex - 1
+        } else {
+            return true
+        }
+    }
+
+    return false;
+}
+
+function ascending(a, b) {
+    return a > b ? 1 : -1
+}
+
+},{}],10:[function(require,module,exports){
+(function (global){
+var topLevel = typeof global !== 'undefined' ? global :
+    typeof window !== 'undefined' ? window : {}
+var minDoc = require('min-document');
+
+if (typeof document !== 'undefined') {
+    module.exports = document;
+} else {
+    var doccy = topLevel['__GLOBAL_DOCUMENT_CACHE@4'];
+
+    if (!doccy) {
+        doccy = topLevel['__GLOBAL_DOCUMENT_CACHE@4'] = minDoc;
+    }
+
+    module.exports = doccy;
+}
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{"min-document":60}],11:[function(require,module,exports){
+var applyProperties = require("./apply-properties")
+
+var isWidget = require("vtree/is-widget")
+var VPatch = require("vtree/vpatch")
+
+var render = require("./create-element")
+var updateWidget = require("./update-widget")
+
+module.exports = applyPatch
+
+function applyPatch(vpatch, domNode, renderOptions) {
+    var type = vpatch.type
+    var vNode = vpatch.vNode
+    var patch = vpatch.patch
+
+    switch (type) {
+        case VPatch.REMOVE:
+            return removeNode(domNode, vNode)
+        case VPatch.INSERT:
+            return insertNode(domNode, patch, renderOptions)
+        case VPatch.VTEXT:
+            return stringPatch(domNode, vNode, patch, renderOptions)
+        case VPatch.WIDGET:
+            return widgetPatch(domNode, vNode, patch, renderOptions)
+        case VPatch.VNODE:
+            return vNodePatch(domNode, vNode, patch, renderOptions)
+        case VPatch.ORDER:
+            reorderChildren(domNode, patch)
+            return domNode
+        case VPatch.PROPS:
+            applyProperties(domNode, patch, vNode.properties, renderOptions)
+            return domNode
+        case VPatch.THUNK:
+            return replaceRoot(domNode,
+                renderOptions.patch(domNode, patch, renderOptions))
+        default:
+            return domNode
+    }
+}
+
+function removeNode(domNode, vNode) {
+    var parentNode = domNode.parentNode
+
+    if (parentNode) {
+        parentNode.removeChild(domNode)
+    }
+
+    destroyWidget(domNode, vNode);
+
+    return null
+}
+
+function insertNode(parentNode, vNode, renderOptions) {
+    var newNode = render(vNode, renderOptions)
+
+    if (parentNode) {
+        parentNode.appendChild(newNode)
+    }
+
+    return parentNode
+}
+
+function stringPatch(domNode, leftVNode, vText, renderOptions) {
+    var newNode
+
+    if (domNode.nodeType === 3) {
+        domNode.replaceData(0, domNode.length, vText.text)
+        newNode = domNode
+    } else {
+        var parentNode = domNode.parentNode
+        newNode = render(vText, renderOptions)
+
+        if (parentNode) {
+            parentNode.replaceChild(newNode, domNode)
+        }
+    }
+
+    destroyWidget(domNode, leftVNode)
+
+    return newNode
+}
+
+function widgetPatch(domNode, leftVNode, widget, renderOptions) {
+    if (updateWidget(leftVNode, widget)) {
+        return widget.update(leftVNode, domNode) || domNode
+    }
+
+    var parentNode = domNode.parentNode
+    var newWidget = render(widget, renderOptions)
+
+    if (parentNode) {
+        parentNode.replaceChild(newWidget, domNode)
+    }
+
+    destroyWidget(domNode, leftVNode)
+
+    return newWidget
+}
+
+function vNodePatch(domNode, leftVNode, vNode, renderOptions) {
+    var parentNode = domNode.parentNode
+    var newNode = render(vNode, renderOptions)
+
+    if (parentNode) {
+        parentNode.replaceChild(newNode, domNode)
+    }
+
+    destroyWidget(domNode, leftVNode)
+
+    return newNode
+}
+
+function destroyWidget(domNode, w) {
+    if (typeof w.destroy === "function" && isWidget(w)) {
+        w.destroy(domNode)
+    }
+}
+
+function reorderChildren(domNode, bIndex) {
+    var children = []
+    var childNodes = domNode.childNodes
+    var len = childNodes.length
+    var i
+    var reverseIndex = bIndex.reverse
+
+    for (i = 0; i < len; i++) {
+        children.push(domNode.childNodes[i])
+    }
+
+    var insertOffset = 0
+    var move
+    var node
+    var insertNode
+    for (i = 0; i < len; i++) {
+        move = bIndex[i]
+        if (move !== undefined && move !== i) {
+            // the element currently at this index will be moved later so increase the insert offset
+            if (reverseIndex[i] > i) {
+                insertOffset++
+            }
+
+            node = children[move]
+            insertNode = childNodes[i + insertOffset] || null
+            if (node !== insertNode) {
+                domNode.insertBefore(node, insertNode)
+            }
+
+            // the moved element came from the front of the array so reduce the insert offset
+            if (move < i) {
+                insertOffset--
+            }
+        }
+
+        // element at this index is scheduled to be removed so increase insert offset
+        if (i in bIndex.removes) {
+            insertOffset++
+        }
+    }
+}
+
+function replaceRoot(oldRoot, newRoot) {
+    if (oldRoot && newRoot && oldRoot !== newRoot && oldRoot.parentNode) {
+        console.log(oldRoot)
+        oldRoot.parentNode.replaceChild(newRoot, oldRoot)
+    }
+
+    return newRoot;
+}
+
+},{"./apply-properties":7,"./create-element":8,"./update-widget":13,"vtree/is-widget":20,"vtree/vpatch":22}],12:[function(require,module,exports){
+var document = require("global/document")
+var isArray = require("x-is-array")
+
+var domIndex = require("./dom-index")
+var patchOp = require("./patch-op")
+module.exports = patch
+
+function patch(rootNode, patches, renderOptions) {
+    return patchRecursive(rootNode, patches, renderOptions)
+}
+
+function patchRecursive(rootNode, patches, renderOptions) {
+    var indices = patchIndices(patches)
+
+    if (indices.length === 0) {
+        return rootNode
+    }
+
+    var index = domIndex(rootNode, patches.a, indices)
+    var ownerDocument = rootNode.ownerDocument
+
+    if (!renderOptions) {
+        renderOptions = {}
+        if (ownerDocument !== document) {
+            renderOptions.document = ownerDocument
+        }
+    }
+
+    if (!renderOptions.patch) {
+        renderOptions.patch = patchRecursive
+    }
+
+    for (var i = 0; i < indices.length; i++) {
+        var nodeIndex = indices[i]
+        rootNode = applyPatch(rootNode,
+            index[nodeIndex],
+            patches[nodeIndex],
+            renderOptions)
+    }
+
+    return rootNode
+}
+
+function applyPatch(rootNode, domNode, patchList, renderOptions) {
+    if (!domNode) {
+        return rootNode
+    }
+
+    var newNode
+
+    if (isArray(patchList)) {
+        for (var i = 0; i < patchList.length; i++) {
+            newNode = patchOp(patchList[i], domNode, renderOptions)
+
+            if (domNode === rootNode) {
+                rootNode = newNode
+            }
+        }
+    } else {
+        newNode = patchOp(patchList, domNode, renderOptions)
+
+        if (domNode === rootNode) {
+            rootNode = newNode
+        }
+    }
+
+    return rootNode
+}
+
+function patchIndices(patches) {
+    var indices = []
+
+    for (var key in patches) {
+        if (key !== "a") {
+            indices.push(Number(key))
+        }
+    }
+
+    return indices
+}
+
+},{"./dom-index":9,"./patch-op":11,"global/document":10,"x-is-array":56}],13:[function(require,module,exports){
+var isWidget = require("vtree/is-widget")
+
+module.exports = updateWidget
+
+function updateWidget(a, b) {
+    if (isWidget(a) && isWidget(b)) {
+        if ("name" in a && "name" in b) {
+            return a.id === b.id
+        } else {
+            return a.init === b.init
+        }
+    }
+
+    return false
+}
+
+},{"vtree/is-widget":20}],14:[function(require,module,exports){
+var isArray = require("x-is-array")
+var isObject = require("is-object")
+
+var VPatch = require("./vpatch")
+var isVNode = require("./is-vnode")
+var isVText = require("./is-vtext")
+var isWidget = require("./is-widget")
+var isThunk = require("./is-thunk")
+var handleThunk = require("./handle-thunk")
+
+module.exports = diff
+
+function diff(a, b) {
+    var patch = { a: a }
+    walk(a, b, patch, 0)
+    return patch
+}
+
+function walk(a, b, patch, index) {
+    if (a === b) {
+        if (isThunk(a) || isThunk(b)) {
+            thunks(a, b, patch, index)
+        } else {
+            hooks(b, patch, index)
+        }
+        return
+    }
+
+    var apply = patch[index]
+
+    if (b == null) {
+        apply = appendPatch(apply, new VPatch(VPatch.REMOVE, a, b))
+        destroyWidgets(a, patch, index)
+    } else if (isThunk(a) || isThunk(b)) {
+        thunks(a, b, patch, index)
+    } else if (isVNode(b)) {
+        if (isVNode(a)) {
+            if (a.tagName === b.tagName &&
+                a.namespace === b.namespace &&
+                a.key === b.key) {
+                var propsPatch = diffProps(a.properties, b.properties, b.hooks)
+                if (propsPatch) {
+                    apply = appendPatch(apply,
+                        new VPatch(VPatch.PROPS, a, propsPatch))
+                }
+                apply = diffChildren(a, b, patch, apply, index)
+            } else {
+                apply = appendPatch(apply, new VPatch(VPatch.VNODE, a, b))
+                destroyWidgets(a, patch, index)
+            }
+        } else {
+            apply = appendPatch(apply, new VPatch(VPatch.VNODE, a, b))
+            destroyWidgets(a, patch, index)
+        }
+    } else if (isVText(b)) {
+        if (!isVText(a)) {
+            apply = appendPatch(apply, new VPatch(VPatch.VTEXT, a, b))
+            destroyWidgets(a, patch, index)
+        } else if (a.text !== b.text) {
+            apply = appendPatch(apply, new VPatch(VPatch.VTEXT, a, b))
+        }
+    } else if (isWidget(b)) {
+        apply = appendPatch(apply, new VPatch(VPatch.WIDGET, a, b))
+
+        if (!isWidget(a)) {
+            destroyWidgets(a, patch, index)
+        }
+    }
+
+    if (apply) {
+        patch[index] = apply
+    }
+}
+
+function diffProps(a, b, hooks) {
+    var diff
+
+    for (var aKey in a) {
+        if (!(aKey in b)) {
+            diff = diff || {}
+            diff[aKey] = undefined
+        }
+
+        var aValue = a[aKey]
+        var bValue = b[aKey]
+
+        if (hooks && aKey in hooks) {
+            diff = diff || {}
+            diff[aKey] = bValue
+        } else {
+            if (isObject(aValue) && isObject(bValue)) {
+                if (getPrototype(bValue) !== getPrototype(aValue)) {
+                    diff = diff || {}
+                    diff[aKey] = bValue
+                } else {
+                    var objectDiff = diffProps(aValue, bValue)
+                    if (objectDiff) {
+                        diff = diff || {}
+                        diff[aKey] = objectDiff
+                    }
+                }
+            } else if (aValue !== bValue) {
+                diff = diff || {}
+                diff[aKey] = bValue
+            }
+        }
+    }
+
+    for (var bKey in b) {
+        if (!(bKey in a)) {
+            diff = diff || {}
+            diff[bKey] = b[bKey]
+        }
+    }
+
+    return diff
+}
+
+function getPrototype(value) {
+    if (Object.getPrototypeOf) {
+        return Object.getPrototypeOf(value)
+    } else if (value.__proto__) {
+        return value.__proto__
+    } else if (value.constructor) {
+        return value.constructor.prototype
+    }
+}
+
+function diffChildren(a, b, patch, apply, index) {
+    var aChildren = a.children
+    var bChildren = reorder(aChildren, b.children)
+
+    var aLen = aChildren.length
+    var bLen = bChildren.length
+    var len = aLen > bLen ? aLen : bLen
+
+    for (var i = 0; i < len; i++) {
+        var leftNode = aChildren[i]
+        var rightNode = bChildren[i]
+        index += 1
+
+        if (!leftNode) {
+            if (rightNode) {
+                // Excess nodes in b need to be added
+                apply = appendPatch(apply,
+                    new VPatch(VPatch.INSERT, null, rightNode))
+            }
+        } else if (!rightNode) {
+            if (leftNode) {
+                // Excess nodes in a need to be removed
+                patch[index] = new VPatch(VPatch.REMOVE, leftNode, null)
+                destroyWidgets(leftNode, patch, index)
+            }
+        } else {
+            walk(leftNode, rightNode, patch, index)
+        }
+
+        if (isVNode(leftNode) && leftNode.count) {
+            index += leftNode.count
+        }
+    }
+
+    if (bChildren.moves) {
+        // Reorder nodes last
+        apply = appendPatch(apply, new VPatch(VPatch.ORDER, a, bChildren.moves))
+    }
+
+    return apply
+}
+
+// Patch records for all destroyed widgets must be added because we need
+// a DOM node reference for the destroy function
+function destroyWidgets(vNode, patch, index) {
+    if (isWidget(vNode)) {
+        if (typeof vNode.destroy === "function") {
+            patch[index] = new VPatch(VPatch.REMOVE, vNode, null)
+        }
+    } else if (isVNode(vNode) && vNode.hasWidgets) {
+        var children = vNode.children
+        var len = children.length
+        for (var i = 0; i < len; i++) {
+            var child = children[i]
+            index += 1
+
+            destroyWidgets(child, patch, index)
+
+            if (isVNode(child) && child.count) {
+                index += child.count
+            }
+        }
+    }
+}
+
+// Create a sub-patch for thunks
+function thunks(a, b, patch, index) {
+    var nodes = handleThunk(a, b);
+    var thunkPatch = diff(nodes.a, nodes.b)
+    if (hasPatches(thunkPatch)) {
+        patch[index] = new VPatch(VPatch.THUNK, null, thunkPatch)
+    }
+}
+
+function hasPatches(patch) {
+    for (var index in patch) {
+        if (index !== "a") {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Execute hooks when two nodes are identical
+function hooks(vNode, patch, index) {
+    if (isVNode(vNode)) {
+        if (vNode.hooks) {
+            patch[index] = new VPatch(VPatch.PROPS, vNode.hooks, vNode.hooks)
+        }
+
+        if (vNode.descendantHooks) {
+            var children = vNode.children
+            var len = children.length
+            for (var i = 0; i < len; i++) {
+                var child = children[i]
+                index += 1
+
+                hooks(child, patch, index)
+
+                if (isVNode(child) && child.count) {
+                    index += child.count
+                }
+            }
+        }
+    }
+}
+
+// List diff, naive left to right reordering
+function reorder(aChildren, bChildren) {
+
+    var bKeys = keyIndex(bChildren)
+
+    if (!bKeys) {
+        return bChildren
+    }
+
+    var aKeys = keyIndex(aChildren)
+
+    if (!aKeys) {
+        return bChildren
+    }
+
+    var bMatch = {}, aMatch = {}
+
+    for (var key in bKeys) {
+        bMatch[bKeys[key]] = aKeys[key]
+    }
+
+    for (var key in aKeys) {
+        aMatch[aKeys[key]] = bKeys[key]
+    }
+
+    var aLen = aChildren.length
+    var bLen = bChildren.length
+    var len = aLen > bLen ? aLen : bLen
+    var shuffle = []
+    var freeIndex = 0
+    var i = 0
+    var moveIndex = 0
+    var moves = {}
+    var removes = moves.removes = {}
+    var reverse = moves.reverse = {}
+    var hasMoves = false
+
+    while (freeIndex < len) {
+        var move = aMatch[i]
+        if (move !== undefined) {
+            shuffle[i] = bChildren[move]
+            if (move !== moveIndex) {
+                moves[move] = moveIndex
+                reverse[moveIndex] = move
+                hasMoves = true
+            }
+            moveIndex++
+        } else if (i in aMatch) {
+            shuffle[i] = undefined
+            removes[i] = moveIndex++
+            hasMoves = true
+        } else {
+            while (bMatch[freeIndex] !== undefined) {
+                freeIndex++
+            }
+
+            if (freeIndex < len) {
+                var freeChild = bChildren[freeIndex]
+                if (freeChild) {
+                    shuffle[i] = freeChild
+                    if (freeIndex !== moveIndex) {
+                        hasMoves = true
+                        moves[freeIndex] = moveIndex
+                        reverse[moveIndex] = freeIndex
+                    }
+                    moveIndex++
+                }
+                freeIndex++
+            }
+        }
+        i++
+    }
+
+    if (hasMoves) {
+        shuffle.moves = moves
+    }
+
+    return shuffle
+}
+
+function keyIndex(children) {
+    var i, keys
+
+    for (i = 0; i < children.length; i++) {
+        var child = children[i]
+
+        if (child.key !== undefined) {
+            keys = keys || {}
+            keys[child.key] = i
+        }
+    }
+
+    return keys
+}
+
+function appendPatch(apply, patch) {
+    if (apply) {
+        if (isArray(apply)) {
+            apply.push(patch)
+        } else {
+            apply = [apply, patch]
+        }
+
+        return apply
+    } else {
+        return patch
+    }
+}
+
+},{"./handle-thunk":15,"./is-thunk":16,"./is-vnode":18,"./is-vtext":19,"./is-widget":20,"./vpatch":22,"is-object":4,"x-is-array":56}],15:[function(require,module,exports){
+var isVNode = require("./is-vnode")
+var isVText = require("./is-vtext")
+var isWidget = require("./is-widget")
+var isThunk = require("./is-thunk")
+
+module.exports = handleThunk
+
+function handleThunk(a, b) {
+    var renderedA = a
+    var renderedB = b
+
+    if (isThunk(b)) {
+        renderedB = renderThunk(b, a)
+    }
+
+    if (isThunk(a)) {
+        renderedA = renderThunk(a, null)
+    }
+
+    return {
+        a: renderedA,
+        b: renderedB
+    }
+}
+
+function renderThunk(thunk, previous) {
+    var renderedThunk = thunk.vnode
+
+    if (!renderedThunk) {
+        renderedThunk = thunk.vnode = thunk.render(previous)
+    }
+
+    if (!(isVNode(renderedThunk) ||
+            isVText(renderedThunk) ||
+            isWidget(renderedThunk))) {
+        throw new Error("thunk did not return a valid node");
+    }
+
+    return renderedThunk
+}
+
+},{"./is-thunk":16,"./is-vnode":18,"./is-vtext":19,"./is-widget":20}],16:[function(require,module,exports){
+module.exports = isThunk
+
+function isThunk(t) {
+    return t && t.type === "Thunk"
+}
+
+},{}],17:[function(require,module,exports){
+module.exports = isHook
+
+function isHook(hook) {
+    return hook && typeof hook.hook === "function" &&
+        !hook.hasOwnProperty("hook")
+}
+
+},{}],18:[function(require,module,exports){
+var version = require("./version")
+
+module.exports = isVirtualNode
+
+function isVirtualNode(x) {
+    return x && x.type === "VirtualNode" && x.version === version
+}
+
+},{"./version":21}],19:[function(require,module,exports){
+var version = require("./version")
+
+module.exports = isVirtualText
+
+function isVirtualText(x) {
+    return x && x.type === "VirtualText" && x.version === version
+}
+
+},{"./version":21}],20:[function(require,module,exports){
+module.exports = isWidget
+
+function isWidget(w) {
+    return w && w.type === "Widget"
+}
+
+},{}],21:[function(require,module,exports){
+module.exports = "1"
+
+},{}],22:[function(require,module,exports){
+var version = require("./version")
+
+VirtualPatch.NONE = 0
+VirtualPatch.VTEXT = 1
+VirtualPatch.VNODE = 2
+VirtualPatch.WIDGET = 3
+VirtualPatch.PROPS = 4
+VirtualPatch.ORDER = 5
+VirtualPatch.INSERT = 6
+VirtualPatch.REMOVE = 7
+VirtualPatch.THUNK = 8
+
+module.exports = VirtualPatch
+
+function VirtualPatch(type, vNode, patch) {
+    this.type = Number(type)
+    this.vNode = vNode
+    this.patch = patch
+}
+
+VirtualPatch.prototype.version = version
+VirtualPatch.prototype.type = "VirtualPatch"
+
+},{"./version":21}],23:[function(require,module,exports){
+var patch = require("vdom/patch")
+
+module.exports = patch
+
+},{"vdom/patch":12}],24:[function(require,module,exports){
+module.exports = AttributeHook;
+
+function AttributeHook(value) {
+    if (!(this instanceof AttributeHook)) {
+        return new AttributeHook(value);
+    }
+
+    this.value = value;
+}
+
+AttributeHook.prototype.hook = function (node, prop, prev) {
+    if (prev && prev.value === this.value) {
+        return;
+    }
+
+    node.setAttributeNS(null, prop, this.value)
+}
+
+},{}],25:[function(require,module,exports){
+var DataSet = require("data-set")
+
+module.exports = DataSetHook;
+
+function DataSetHook(value) {
+    if (!(this instanceof DataSetHook)) {
+        return new DataSetHook(value);
+    }
+
+    this.value = value;
+}
+
+DataSetHook.prototype.hook = function (node, propertyName) {
+    var ds = DataSet(node)
+    var propName = propertyName.substr(5)
+
+    ds[propName] = this.value;
+};
+
+},{"data-set":30}],26:[function(require,module,exports){
+var DataSet = require("data-set")
+
+module.exports = DataSetHook;
+
+function DataSetHook(value) {
+    if (!(this instanceof DataSetHook)) {
+        return new DataSetHook(value);
+    }
+
+    this.value = value;
+}
+
+DataSetHook.prototype.hook = function (node, propertyName) {
+    var ds = DataSet(node)
+    var propName = propertyName.substr(3)
+
+    ds[propName] = this.value;
+};
+
+},{"data-set":30}],27:[function(require,module,exports){
+module.exports = SoftSetHook;
+
+function SoftSetHook(value) {
+    if (!(this instanceof SoftSetHook)) {
+        return new SoftSetHook(value);
+    }
+
+    this.value = value;
+}
+
+SoftSetHook.prototype.hook = function (node, propertyName) {
+    if (node[propertyName] !== this.value) {
+        node[propertyName] = this.value;
+    }
+};
+
+},{}],28:[function(require,module,exports){
+var VNode = require("vtree/vnode.js")
+var VText = require("vtree/vtext.js")
+var isVNode = require("vtree/is-vnode")
+var isVText = require("vtree/is-vtext")
+var isWidget = require("vtree/is-widget")
+var isHook = require("vtree/is-vhook")
+var isVThunk = require("vtree/is-thunk")
+var TypedError = require("error/typed")
+
+var parseTag = require("./parse-tag.js")
+var softSetHook = require("./hooks/soft-set-hook.js")
+var dataSetHook = require("./hooks/data-set-hook.js")
+var evHook = require("./hooks/ev-hook.js")
+
+var UnexpectedVirtualElement = TypedError({
+    type: "virtual-hyperscript.unexpected.virtual-element",
+    message: "Unexpected virtual child passed to h().\n" +
+        "Expected a VNode / Vthunk / VWidget / string but:\n" +
+        "got a {foreignObjectStr}.\n" +
+        "The parent vnode is {parentVnodeStr}.\n" +
+        "Suggested fix: change your `h(..., [ ... ])` callsite.",
+    foreignObjectStr: null,
+    parentVnodeStr: null,
+    foreignObject: null,
+    parentVnode: null
+})
+
+module.exports = h
+
+function h(tagName, properties, children) {
+    var childNodes = []
+    var tag, props, key, namespace
+
+    if (!children && isChildren(properties)) {
+        children = properties
+        props = {}
+    }
+
+    props = props || properties || {}
+    tag = parseTag(tagName, props)
+
+    // support keys
+    if ("key" in props) {
+        key = props.key
+        props.key = undefined
+    }
+
+    // support namespace
+    if ("namespace" in props) {
+        namespace = props.namespace
+        props.namespace = undefined
+    }
+
+    // fix cursor bug
+    if (tag === "input" &&
+        "value" in props &&
+        props.value !== undefined &&
+        !isHook(props.value)
+    ) {
+        props.value = softSetHook(props.value)
+    }
+
+    var keys = Object.keys(props)
+    var propName, value
+    for (var j = 0; j < keys.length; j++) {
+        propName = keys[j]
+        value = props[propName]
+        if (isHook(value)) {
+            continue
+        }
+
+        // add data-foo support
+        if (propName.substr(0, 5) === "data-") {
+            props[propName] = dataSetHook(value)
+        }
+
+        // add ev-foo support
+        if (propName.substr(0, 3) === "ev-") {
+            props[propName] = evHook(value)
+        }
+    }
+
+    if (children !== undefined && children !== null) {
+        addChild(children, childNodes, tag, props)
+    }
+
+
+    var node = new VNode(tag, props, childNodes, key, namespace)
+
+    return node
+}
+
+function addChild(c, childNodes, tag, props) {
+    if (typeof c === "string") {
+        childNodes.push(new VText(c))
+    } else if (isChild(c)) {
+        childNodes.push(c)
+    } else if (Array.isArray(c)) {
+        for (var i = 0; i < c.length; i++) {
+            addChild(c[i], childNodes, tag, props)
+        }
+    } else if (c === null || c === undefined) {
+        return
+    } else {
+        throw UnexpectedVirtualElement({
+            foreignObjectStr: JSON.stringify(c),
+            foreignObject: c,
+            parentVnodeStr: JSON.stringify({
+                tagName: tag,
+                properties: props
+            }),
+            parentVnode: {
+                tagName: tag,
+                properties: props
+            }
+        })
+    }
+}
+
+function isChild(x) {
+    return isVNode(x) || isVText(x) || isWidget(x) || isVThunk(x)
+}
+
+function isChildren(x) {
+    return typeof x === "string" || Array.isArray(x) || isChild(x)
+}
+
+},{"./hooks/data-set-hook.js":25,"./hooks/ev-hook.js":26,"./hooks/soft-set-hook.js":27,"./parse-tag.js":46,"error/typed":37,"vtree/is-thunk":38,"vtree/is-vhook":39,"vtree/is-vnode":40,"vtree/is-vtext":41,"vtree/is-widget":42,"vtree/vnode.js":44,"vtree/vtext.js":45}],29:[function(require,module,exports){
+module.exports = createHash
+
+function createHash(elem) {
+    var attributes = elem.attributes
+    var hash = {}
+
+    if (attributes === null || attributes === undefined) {
+        return hash
+    }
+
+    for (var i = 0; i < attributes.length; i++) {
+        var attr = attributes[i]
+
+        if (attr.name.substr(0,5) !== "data-") {
+            continue
+        }
+
+        hash[attr.name.substr(5)] = attr.value
+    }
+
+    return hash
+}
+
+},{}],30:[function(require,module,exports){
+var createStore = require("weakmap-shim/create-store")
+var Individual = require("individual")
+
+var createHash = require("./create-hash.js")
+
+var hashStore = Individual("__DATA_SET_WEAKMAP@3", createStore())
+
+module.exports = DataSet
+
+function DataSet(elem) {
+    var store = hashStore(elem)
+
+    if (!store.hash) {
+        store.hash = createHash(elem)
+    }
+
+    return store.hash
+}
+
+},{"./create-hash.js":29,"individual":31,"weakmap-shim/create-store":32}],31:[function(require,module,exports){
+(function (global){
+var root = typeof window !== 'undefined' ?
+    window : typeof global !== 'undefined' ?
+    global : {};
+
+module.exports = Individual
+
+function Individual(key, value) {
+    if (root[key]) {
+        return root[key]
+    }
+
+    Object.defineProperty(root, key, {
+        value: value
+        , configurable: true
+    })
+
+    return value
+}
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],32:[function(require,module,exports){
+var hiddenStore = require('./hidden-store.js');
+
+module.exports = createStore;
+
+function createStore() {
+    var key = {};
+
+    return function (obj) {
+        if (typeof obj !== 'object' || obj === null) {
+            throw new Error('Weakmap-shim: Key must be object')
+        }
+
+        var store = obj.valueOf(key);
+        return store && store.identity === key ?
+            store : hiddenStore(obj, key);
+    };
+}
+
+},{"./hidden-store.js":33}],33:[function(require,module,exports){
+module.exports = hiddenStore;
+
+function hiddenStore(obj, key) {
+    var store = { identity: key };
+    var valueOf = obj.valueOf;
+
+    Object.defineProperty(obj, "valueOf", {
+        value: function (value) {
+            return value !== key ?
+                valueOf.apply(this, arguments) : store;
+        },
+        writable: true
+    });
+
+    return store;
+}
+
+},{}],34:[function(require,module,exports){
+module.exports = function(obj) {
+    if (typeof obj === 'string') return camelCase(obj);
+    return walk(obj);
+};
+
+function walk (obj) {
+    if (!obj || typeof obj !== 'object') return obj;
+    if (isDate(obj) || isRegex(obj)) return obj;
+    if (isArray(obj)) return map(obj, walk);
+    return reduce(objectKeys(obj), function (acc, key) {
+        var camel = camelCase(key);
+        acc[camel] = walk(obj[key]);
+        return acc;
+    }, {});
+}
+
+function camelCase(str) {
+    return str.replace(/[_.-](\w|$)/g, function (_,x) {
+        return x.toUpperCase();
+    });
+}
+
+var isArray = Array.isArray || function (obj) {
+    return Object.prototype.toString.call(obj) === '[object Array]';
+};
+
+var isDate = function (obj) {
+    return Object.prototype.toString.call(obj) === '[object Date]';
+};
+
+var isRegex = function (obj) {
+    return Object.prototype.toString.call(obj) === '[object RegExp]';
+};
+
+var has = Object.prototype.hasOwnProperty;
+var objectKeys = Object.keys || function (obj) {
+    var keys = [];
+    for (var key in obj) {
+        if (has.call(obj, key)) keys.push(key);
+    }
+    return keys;
+};
+
+function map (xs, f) {
+    if (xs.map) return xs.map(f);
+    var res = [];
+    for (var i = 0; i < xs.length; i++) {
+        res.push(f(xs[i], i));
+    }
+    return res;
+}
+
+function reduce (xs, f, acc) {
+    if (xs.reduce) return xs.reduce(f, acc);
+    for (var i = 0; i < xs.length; i++) {
+        acc = f(acc, xs[i], i);
+    }
+    return acc;
+}
+
+},{}],35:[function(require,module,exports){
+var nargs = /\{([0-9a-zA-Z]+)\}/g
+var slice = Array.prototype.slice
+
+module.exports = template
+
+function template(string) {
+    var args
+
+    if (arguments.length === 2 && typeof arguments[1] === "object") {
+        args = arguments[1]
+    } else {
+        args = slice.call(arguments, 1)
+    }
+
+    if (!args || !args.hasOwnProperty) {
+        args = {}
+    }
+
+    return string.replace(nargs, function replaceArg(match, i, index) {
+        var result
+
+        if (string[index - 1] === "{" &&
+            string[index + match.length] === "}") {
+            return i
+        } else {
+            result = args.hasOwnProperty(i) ? args[i] : null
+            if (result === null || result === undefined) {
+                return ""
+            }
+
+            return result
+        }
+    })
+}
+
+},{}],36:[function(require,module,exports){
+module.exports = extend
+
+function extend(target) {
+    for (var i = 1; i < arguments.length; i++) {
+        var source = arguments[i]
+
+        for (var key in source) {
+            if (source.hasOwnProperty(key)) {
+                target[key] = source[key]
+            }
+        }
+    }
+
+    return target
+}
+
+},{}],37:[function(require,module,exports){
+var camelize = require("camelize")
+var template = require("string-template")
+var extend = require("xtend/mutable")
+
+module.exports = TypedError
+
+function TypedError(args) {
+    if (!args) {
+        throw new Error("args is required");
+    }
+    if (!args.type) {
+        throw new Error("args.type is required");
+    }
+    if (!args.message) {
+        throw new Error("args.message is required");
+    }
+
+    var message = args.message
+
+    if (args.type && !args.name) {
+        var errorName = camelize(args.type) + "Error"
+        args.name = errorName[0].toUpperCase() + errorName.substr(1)
+    }
+
+    createError.type = args.type;
+    createError._name = args.name;
+
+    return createError;
+
+    function createError(opts) {
+        var result = new Error()
+
+        Object.defineProperty(result, "type", {
+            value: result.type,
+            enumerable: true,
+            writable: true,
+            configurable: true
+        })
+
+        var options = extend({}, args, opts)
+
+        extend(result, options)
+        result.message = template(message, options)
+
+        return result
+    }
+}
+
+
+},{"camelize":34,"string-template":35,"xtend/mutable":36}],38:[function(require,module,exports){
+module.exports=require(16)
+},{"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-thunk.js":16}],39:[function(require,module,exports){
+module.exports=require(17)
+},{"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-vhook.js":17}],40:[function(require,module,exports){
+module.exports=require(18)
+},{"./version":43,"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-vnode.js":18}],41:[function(require,module,exports){
+module.exports=require(19)
+},{"./version":43,"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-vtext.js":19}],42:[function(require,module,exports){
+module.exports=require(20)
+},{"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-widget.js":20}],43:[function(require,module,exports){
+module.exports=require(21)
+},{"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/version.js":21}],44:[function(require,module,exports){
+var version = require("./version")
+var isVNode = require("./is-vnode")
+var isWidget = require("./is-widget")
+var isVHook = require("./is-vhook")
+
+module.exports = VirtualNode
+
+var noProperties = {}
+var noChildren = []
+
+function VirtualNode(tagName, properties, children, key, namespace) {
+    this.tagName = tagName
+    this.properties = properties || noProperties
+    this.children = children || noChildren
+    this.key = key != null ? String(key) : undefined
+    this.namespace = (typeof namespace === "string") ? namespace : null
+
+    var count = (children && children.length) || 0
+    var descendants = 0
+    var hasWidgets = false
+    var descendantHooks = false
+    var hooks
+
+    for (var propName in properties) {
+        if (properties.hasOwnProperty(propName)) {
+            var property = properties[propName]
+            if (isVHook(property)) {
+                if (!hooks) {
+                    hooks = {}
+                }
+
+                hooks[propName] = property
+            }
+        }
+    }
+
+    for (var i = 0; i < count; i++) {
+        var child = children[i]
+        if (isVNode(child)) {
+            descendants += child.count || 0
+
+            if (!hasWidgets && child.hasWidgets) {
+                hasWidgets = true
+            }
+
+            if (!descendantHooks && (child.hooks || child.descendantHooks)) {
+                descendantHooks = true
+            }
+        } else if (!hasWidgets && isWidget(child)) {
+            if (typeof child.destroy === "function") {
+                hasWidgets = true
+            }
+        }
+    }
+
+    this.count = count + descendants
+    this.hasWidgets = hasWidgets
+    this.hooks = hooks
+    this.descendantHooks = descendantHooks
+}
+
+VirtualNode.prototype.version = version
+VirtualNode.prototype.type = "VirtualNode"
+
+},{"./is-vhook":39,"./is-vnode":40,"./is-widget":42,"./version":43}],45:[function(require,module,exports){
+var version = require("./version")
+
+module.exports = VirtualText
+
+function VirtualText(text) {
+    this.text = String(text)
+}
+
+VirtualText.prototype.version = version
+VirtualText.prototype.type = "VirtualText"
+
+},{"./version":43}],46:[function(require,module,exports){
+var classIdSplit = /([\.#]?[a-zA-Z0-9_:-]+)/
+var notClassId = /^\.|#/
+
+module.exports = parseTag
+
+function parseTag(tag, props) {
+    if (!tag) {
+        return "div"
+    }
+
+    var noId = !("id" in props)
+
+    var tagParts = tag.split(classIdSplit)
+    var tagName = null
+
+    if (notClassId.test(tagParts[1])) {
+        tagName = "div"
+    }
+
+    var classes, part, type, i
+    for (i = 0; i < tagParts.length; i++) {
+        part = tagParts[i]
+
+        if (!part) {
+            continue
+        }
+
+        type = part.charAt(0)
+
+        if (!tagName) {
+            tagName = part
+        } else if (type === ".") {
+            classes = classes || []
+            classes.push(part.substring(1, part.length))
+        } else if (type === "#" && noId) {
+            props.id = part.substring(1, part.length)
+        }
+    }
+
+    if (classes) {
+        if (props.className) {
+            classes.push(props.className)
+        }
+
+        props.className = classes.join(" ")
+    }
+
+    return tagName ? tagName.toLowerCase() : "div"
+}
+
+},{}],47:[function(require,module,exports){
+var attributeHook = require("./hooks/attribute-hook.js")
+var h = require("./index.js")
+
+var BLACKLISTED_KEYS = {
+    "style": true,
+    "namespace": true,
+    "key": true
+}
+var SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+
+module.exports = svg
+
+function svg(tagName, properties, children) {
+    if (!children && isChildren(properties)) {
+        children = properties
+        properties = {}
+    }
+
+    properties = properties || {}
+
+    // set namespace for svg
+    properties.namespace = SVG_NAMESPACE
+
+    // for each key, if attribute & string, bool or number then
+    // convert it into a setAttribute hook
+    for (var key in properties) {
+        if (!properties.hasOwnProperty(key)) {
+            continue
+        }
+
+        if (BLACKLISTED_KEYS[key]) {
+            continue
+        }
+
+        var value = properties[key]
+        if (typeof value !== "string" &&
+            typeof value !== "number" &&
+            typeof value !== "boolean"
+        ) {
+            continue
+        }
+
+        properties[key] = attributeHook(value)
+    }
+
+    return h(tagName, properties, children)
+}
+
+function isChildren(x) {
+    return typeof x === "string" || Array.isArray(x)
+}
+
+},{"./hooks/attribute-hook.js":24,"./index.js":28}],48:[function(require,module,exports){
+module.exports=require(17)
+},{"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-vhook.js":17}],49:[function(require,module,exports){
+module.exports=require(18)
+},{"./version":52,"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-vnode.js":18}],50:[function(require,module,exports){
+module.exports=require(19)
+},{"./version":52,"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-vtext.js":19}],51:[function(require,module,exports){
+module.exports=require(20)
+},{"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/is-widget.js":20}],52:[function(require,module,exports){
+module.exports=require(21)
+},{"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/version.js":21}],53:[function(require,module,exports){
+module.exports=require(44)
+},{"./is-vhook":48,"./is-vnode":49,"./is-widget":51,"./version":52,"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-hyperscript/node_modules/vtree/vnode.js":44}],54:[function(require,module,exports){
+module.exports=require(22)
+},{"./version":52,"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-dom/node_modules/vtree/vpatch.js":22}],55:[function(require,module,exports){
+module.exports=require(45)
+},{"./version":52,"/home/shashi/.julia/v0.3/Patchwork/runtime/node_modules/virtual-hyperscript/node_modules/vtree/vtext.js":45}],56:[function(require,module,exports){
+var nativeIsArray = Array.isArray
+var toString = Object.prototype.toString
+
+module.exports = nativeIsArray || isArray
+
+function isArray(obj) {
+    return toString.call(obj) === "[object Array]"
+}
+
+},{}],57:[function(require,module,exports){
+isObject = require('is-object')
+
+module.exports = {reorder: reorder,
+                  patchObject: patchObject}
+
+function reorder(array, moves) {
+    if (!arr) { return }
+    var copy = array.slice(0)
+
+    for (var i=0, l=array.length; i < l; i++) {
+        var move = moves[i]
+        if (move !== undefined) {
+            array[move] = copy[i]
+        }
+    }
+    return array
+}
+
+function patchObject(obj, patch) {
+    for (var key in patch) {
+        if (patch[key] && typeof patch[key].hook == "function") {
+            obj[key] = patch[key]
+        } else if (isObject(patch[key]) && isObject(obj[key])) {
+            obj[key] = patchObject(obj[key], patch[key]);
+        } else {
+            obj[key] = patch[key]
+        }
+    }
+}
+
+
+},{"is-object":4}],58:[function(require,module,exports){
+var mutateNode = require("./vnode-patch-op")
+var isArray = require('x-is-array')
+
+module.exports = patchVNode
+
+function patchVNode(root, patches) {
+
+    linkParents(root)
+
+    for (var key in patches) {
+        if (key === "a") continue
+        patch = patches[key]
+        if (isArray(patch)) {
+
+            for (var i=0, l=patch.length; i < l; i++) {
+                mutateNode(patch[i].type, patch[i].vNode, patch[i].patch)
+            }
+        } else {
+            mutateNode(patch.type, patch.vNode, patch.patch)
+        }
+    }
+
+    return root
+}
+
+function linkParents(vNode) {
+    if (!vNode || !vNode.children) { return }
+
+    var children = vNode.children
+    for (var i=0, l=children.length; i < l; i++) {
+        children[i].up = vNode
+        linkParents(children[i])
+    }
+}
+
+},{"./vnode-patch-op":59,"x-is-array":56}],59:[function(require,module,exports){
+var isWidget = require("vtree/is-widget")
+var isVText = require("vtree/is-vtext")
+var VPatch = require("vtree/vpatch")
+var patchUtil = require("./patch-util.js")
+
+module.exports = applyPatch
+
+function applyPatch(type, vNode, patch) {
+
+    switch (type) {
+        case VPatch.REMOVE:
+            return removeNode(vNode)
+        case VPatch.INSERT:
+            return insertNode(vNode, patch)
+        case VPatch.VTEXT:
+            return stringPatch(vNode, patch)
+        case VPatch.VNODE:
+            return vNodePatch(vNode, patch)
+        case VPatch.ORDER:
+            patchUtil.reorder(vNode.children, patch)
+            return vNode
+        case VPatch.PROPS:
+            patchUtil.patchObject(vNode.properties, patch)
+            return vNode
+        default:
+            return vNode
+    }
+}
+
+function offsetCount(node, count) {
+    if (!node) { return }
+    if (node.count !== undefined) {
+        node.count = node.count + count
+        offsetCount(node.up, count)
+    } else {
+        node.count = count
+    }
+}
+
+function removeNode(node) {
+    if (!node) { return }
+    var count = node.count,
+        up = node.up
+
+    var idx = up.children.indexOf(node)
+    if (idx > -1) {
+        up.children.splice(idx, 1)
+        var count = 0
+        if (isVText(node)) {
+            count = -1
+        } else {
+            count = -node.count - 1
+        }
+        offsetCount(up, count)
+    }
+    delete node
+
+    return null
+}
+
+function insertNode(node, child) {
+    node.children.push(child)
+    var count = 0
+    if (isVText(child)) {
+        count = 1
+    } else {
+        count = child.count + 1
+    }
+    offsetCount(node, count)
+    child.up = node
+    return node
+}
+
+function stringPatch(node, patch) {
+    node.text = patch.text
+    return node
+}
+
+function vNodePatch(node, patch) {
+    var up = node.up
+    if (!up) {
+        // copy over the patch to the root node
+        for (key in patch) {
+            if (!patch.hasOwnProperty(key)) continue
+            node[key] = patch[key]
+        }
+        return
+    }
+    var idx = up.children.indexOf(node),
+        count = patch.count || 0
+
+    if (idx > -1) {
+        up.children[idx] = patch
+        if (node.count != count) {
+            offsetCount(up, count - node.count)
+        }
+    }
+
+    return node
+}
+
+},{"./patch-util.js":57,"vtree/is-vtext":50,"vtree/is-widget":51,"vtree/vpatch":54}],60:[function(require,module,exports){
+
+},{}]},{},[1]);
+ </script>
+   <script src="pkg/Escher/bower_components/webcomponentsjs/webcomponents.min.js"></script>
+</head>
+
+<link rel="import" href="pkg/Escher/basics.html">
+<link rel="import" href="pkg/Escher/widgets.html">
+<link rel="import" href="pkg/Escher/tex.html">
+<link rel="import" href="pkg/Escher/layout2.html">
+<link rel="import" href="pkg/Escher/codemirror.html">
+<link rel="import" href="pkg/Escher/animation.html">
+
+<body>
+<signal-container id="root">
+    
+<!--
+  SpinKit - folding cube
+  http://tobiasahlin.com/spinkit/
+-->
+
+<div id="spinner">
+  <div class="sk-folding-cube">
+      <div class="sk-cube1 sk-cube"></div>
+      <div class="sk-cube2 sk-cube"></div>
+      <div class="sk-cube4 sk-cube"></div>
+      <div class="sk-cube3 sk-cube"></div>
+  </div>
+</div>
+
+<style>
+#root .sk-folding-cube {
+  margin-top: 45vh;
+}
+
+.sk-folding-cube {
+  margin: 20px auto;
+  width: 40px;
+  height: 40px;
+  position: relative;
+  -webkit-transform: rotateZ(45deg);
+          transform: rotateZ(45deg);
+}
+
+.sk-folding-cube .sk-cube {
+  float: left;
+  width: 50%;
+  height: 50%;
+  position: relative;
+  -webkit-transform: scale(1.1);
+      -ms-transform: scale(1.1);
+          transform: scale(1.1); 
+}
+.sk-folding-cube .sk-cube:before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #333;
+  -webkit-animation: sk-foldCubeAngle 2.4s infinite linear both;
+          animation: sk-foldCubeAngle 2.4s infinite linear both;
+  -webkit-transform-origin: 100% 100%;
+      -ms-transform-origin: 100% 100%;
+          transform-origin: 100% 100%;
+}
+.sk-folding-cube .sk-cube2 {
+  -webkit-transform: scale(1.1) rotateZ(90deg);
+          transform: scale(1.1) rotateZ(90deg);
+}
+.sk-folding-cube .sk-cube3 {
+  -webkit-transform: scale(1.1) rotateZ(180deg);
+          transform: scale(1.1) rotateZ(180deg);
+}
+.sk-folding-cube .sk-cube4 {
+  -webkit-transform: scale(1.1) rotateZ(270deg);
+          transform: scale(1.1) rotateZ(270deg);
+}
+.sk-folding-cube .sk-cube2:before {
+  -webkit-animation-delay: 0.3s;
+          animation-delay: 0.3s;
+}
+.sk-folding-cube .sk-cube3:before {
+  -webkit-animation-delay: 0.6s;
+          animation-delay: 0.6s; 
+}
+.sk-folding-cube .sk-cube4:before {
+  -webkit-animation-delay: 0.9s;
+          animation-delay: 0.9s;
+}
+@-webkit-keyframes sk-foldCubeAngle {
+  0%, 10% {
+    -webkit-transform: perspective(140px) rotateX(-180deg);
+            transform: perspective(140px) rotateX(-180deg);
+    opacity: 0; 
+  } 25%, 75% {
+    -webkit-transform: perspective(140px) rotateX(0deg);
+            transform: perspective(140px) rotateX(0deg);
+    opacity: 1; 
+  } 90%, 100% {
+    -webkit-transform: perspective(140px) rotateY(180deg);
+            transform: perspective(140px) rotateY(180deg);
+    opacity: 0; 
+  } 
+}
+
+@keyframes sk-foldCubeAngle {
+  0%, 10% {
+    -webkit-transform: perspective(140px) rotateX(-180deg);
+            transform: perspective(140px) rotateX(-180deg);
+    opacity: 0; 
+  } 25%, 75% {
+    -webkit-transform: perspective(140px) rotateX(0deg);
+            transform: perspective(140px) rotateX(0deg);
+    opacity: 1; 
+  } 90%, 100% {
+    -webkit-transform: perspective(140px) rotateY(180deg);
+            transform: perspective(140px) rotateY(180deg);
+    opacity: 0; 
+  }
+}
+</style>
+
+
+</signal-container>
+</div>
+<script>
+window.addEventListener('WebComponentsReady', function() {
+    new Patchwork.Node("root", {"t":"slide-show","p":{"selected":0},"c":[{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-3 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Reactive programming"}]}]},{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Inspiration: Elm"}]}]},{"t":"div","p":{"className":"title-1 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"elm-lang.org"}]}]},{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Reactive.jl"}]}]},{"t":"div","p":{"className":"title-1 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"github.com/JuliaLang/Reactive.jl"}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"pack-across-center flow vertical "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"The Signal primer"}]}]},{"t":"div","p":{"className":"title-3 flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"Think "}]},{"t":"em","p":{"className":"emph "},"c":[{"txt":"circuitry"}]}]}]},{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"code","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"dataₜ ⇝ f ⇝ outputₜ"}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-2 "},"c":[{"txt":"Signal: first principles"}]},{"t":"div","p":{"style":{"height":"2.0em","width":"0.0px"}}},{"t":"div","p":{"style":{"lineHeight":"2.0em","fontSize":"1.5em"},"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"A signal has a value at any given time"}]}]},{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"The value held by a signal can change as time passes"}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-2 "},"c":[{"txt":"Signal Signal"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"span","p":{"style":{"lineHeight":"2.0em","fontSize":"1.5em"}},"c":[{"txt":"An input signal is created as below. It must have a default value."}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"code-mirror","p":{"attributes":{"value":"int_signal = Signal(0)","theme":"elegant","mode":"julia","read-only":null,"line-numbers":true}}},{"t":"div","p":{"style":{"lineHeight":"2.0em","fontSize":"1.5em"},"className":"flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"The value held by an input signal can be updated with "}]},{"t":"code","c":[{"t":"span","c":[{"txt":"push!"}]}]}]}]},{"t":"code-mirror","p":{"attributes":{"value":"push!(int_signal, 42)","theme":"elegant","mode":"julia","read-only":null,"line-numbers":true}}}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-2 "},"c":[{"txt":"Functions that operate on signals"}]},{"t":"div","p":{"style":{"height":"2.0em","width":"0.0px"}}},{"t":"code-mirror","p":{"style":{"lineHeight":"2.0em","fontSize":"1.5em"},"className":"font-monospace ","attributes":{"value":"map     : (Function, Signal) ⟶ Signal\nfoldp       : (Function, initial_value, Signal) ⟶ Signal\nfilter      : (Function, default_value, Signal) ⟶ Signal\nmerge       : (Signal...) ⟶ Signal\ndroprepeats : (Signal) ⟶ Signal\nkeepwhen    : (Signal{Bool}, Signal) ⟶ Signal\nfps         : (Float64) ⟶ Signal\nfpswhen     : (Signal{Bool}, Float64) ⟶ Signal\nthrottle    : (Float64, Signal) ⟶ Signal\n","theme":"elegant","mode":"julia","read-only":null,"line-numbers":null}}}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"pack-across-center flow vertical "},"c":[{"t":"span","p":{"className":"title-3 "},"c":[{"txt":"The DOM - the browser's representation"}]},{"t":"div","p":{"style":{"height":"2.0em","width":"0.0px"}}},{"t":"span","p":{"className":"title-4 "},"c":[{"txt":"¯\\_(ツ)_/¯"}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-3 "},"c":[{"txt":"Virtual DOM"}]},{"t":"div","p":{"style":{"lineHeight":"2.0em","fontSize":"1.5em"},"className":"flow vertical "},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"Enables stateless functions"}]}]}]}]},{"t":"div","p":{"style":{"fontSize":"0.8em","lineHeight":"1.5em","paddingLeft":"3.0em"}},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"A very simple model"}]}]},{"t":"li","c":[{"t":"code","p":{"className":"md-list-item "},"c":[{"t":"span","c":[{"txt":"f : Data -\> UI"}]}]}]},{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"What you are doing actually fits in your head"}]}]}]}]}]},{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"One clever trick: DOM reconciliation"}]}]}]}]},{"t":"div","p":{"style":{"fontSize":"0.8em","lineHeight":"1.5em","paddingLeft":"3.0em"}},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"managed efficiency"}]}]}]}]}]},{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"Gets along oh so well with FRP"}]}]}]}]},{"t":"div","p":{"style":{"fontSize":"0.8em","lineHeight":"1.5em","paddingLeft":"3.0em"}},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"An escape hatch from Callback Hell"}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-3 "},"c":[{"txt":"Virtual DOM is the substrate"}]},{"t":"div","p":{"style":{"height":"2.0em","width":"0.0px"}}},{"t":"span","p":{"className":"title-2 "},"c":[{"txt":"Patchwork.jl"}]},{"t":"span","p":{"className":"title-1 "},"c":[{"txt":"github.com/shashi/Patchwork.jl"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"span","p":{"className":"title-2 "},"c":[{"txt":"virtual-dom"}]},{"t":"span","p":{"className":"title-1 "},"c":[{"txt":"github.com/Matt-Esch/virtual-dom"}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-3 flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"Patchwork.jl provides the "}]},{"t":"code","c":[{"t":"span","c":[{"txt":"Elem"}]}]},{"t":"span","c":[{"txt":" type"}]}]}]},{"t":"div","p":{"style":{"height":"2.0em","width":"0.0px"}}},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"Elem(:div, \"Hello, World\",\n    style=[\n      :padding =\> 1em,\n      :backgroundColor =\> \"steelblue\",\n      :color =\> \"white\"\n    ]\n)","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"215580674918705539687004531828022881428"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-253210036158529851007031611245151154221"},"c":[{"t":"div","p":{"style":{"backgroundColor":"steelblue","padding":"1.0em","color":"white"}},"c":[{"txt":"Hello, World"}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-3 flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"Patchwork.jl provides the "}]},{"t":"code","c":[{"t":"span","c":[{"txt":"Elem"}]}]},{"t":"span","c":[{"txt":" type"}]}]}]},{"t":"div","p":{"style":{"height":"2.0em","width":"0.0px"}}},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"mkcircle(x, y, r, color=\"lightgrey\") =\n    Elem(:svg, :circle,\n        cx=x, cy=y, r=r,\n        style=[:fill =\> color],\n    )\n\nElem(:svg, :svg, [\n    mkcircle(100, 100, 50),\n    mkcircle(100, 200, 70),\n    mkcircle(100, 100, 10, \"orange\"),\n    mkcircle(80, 80, 10, \"white\"),\n    mkcircle(120, 80, 10, \"white\"),\n ], width=500px, height=500px)\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"144448891684312324971530682691080830614"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-114320735098802047687948970256854415285"},"c":[{"t":"span","c":[{"txt":"UndefVarError: px not defined\n\n in |\> at ./operators.jl:198\n in execute_code at /home/shashi/code/escher-demo/code-cell.jl:17"}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"cross-fade-all"},"c":[{"t":"div","p":{"className":"pack-across-center flow vertical "},"c":[{"t":"div","p":{"className":"title-3 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"HTML5 Custom Elements work with Virtual DOM!"}]}]},{"t":"div","p":{"style":{"height":"2.0em","width":"0.0px"}}},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"Elem(\"ka-tex\",\n    source=\"\"\"\n        cos(2\\\\theta) =\n        cos^2 \\\\theta - sin^2 \\\\theta\"\"\",\n    block=true\n)\n\n# code-mirror\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"224569071247922987045422129322741384484"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-125532894679979594424546980588856990184"},"c":[{"t":"ka-tex","p":{"source":"cos(2\\theta) =\ncos^2 \\theta - sin^2 \\theta","block":true}}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-4 "},"c":[{"txt":"Escher.jl"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"span","p":{"className":"title-1 "},"c":[{"txt":"shashi.github.io/Escher.jl"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"span","p":{"style":{"fontSize":"1.5em"}},"c":[{"txt":"Delicious layers of abstraction on top of Virtual DOM"}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-1 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Abstraction 1"}]}]},{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Content: Julia Values to Virtual DOM"}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Content: Textual"}]}]},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"\"Hello, World\"\n\n\n# Markdown\n# CodeMirror\n#\n# using SymPy\n# x = Sym(\"x\")\n# SymPy.diff(sin(x^2), x, 5)\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"125996401877186376320568238344369048248"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-1168504834327749600452889684621777006"},"c":[{"t":"span","c":[{"txt":"Hello, World"}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Content: Vector graphics"}]}]},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"using Compose\n\nfunction sierpinski(n::Int)\n    if n == 0\n        compose(context(), polygon([(1,1), (0,1), (1/2, 0)]))\n    else\n        t = sierpinski(n - 1)\n        compose(context(),\n                (context(1/4,   0, 1/2, 1/2), t),\n                (context(  0, 1/2, 1/2, 1/2), t),\n                (context(1/2, 1/2, 1/2, 1/2), t))\n    end\nend\n\ndrawing(4inch, (2*√3)*inch,\n    sierpinski(2))\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"225960936686509446330570989228214743251"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-191718178729134057343413729790431857384"},"c":[{"t":"div","p":{"className":"graphic-wrap"},"c":[{"t":"svg","p":{"viewBox":"0 0 101.6 87.98818102449896","stroke-width":"0.3","width":"101.6mm","font-size":"3.88","height":"87.98818102449896mm","stroke":"none","fill":"#000000"},"c":[{"t":"path","p":{"d":"M101.6,87.99 L 76.2 87.99 88.9 65.99 z"},"n":"svg"},{"t":"path","p":{"d":"M76.2,87.99 L 50.8 87.99 63.5 65.99 z"},"n":"svg"},{"t":"path","p":{"d":"M88.9,65.99 L 63.5 65.99 76.2 43.99 z"},"n":"svg"},{"t":"path","p":{"d":"M50.8,87.99 L 25.4 87.99 38.1 65.99 z"},"n":"svg"},{"t":"path","p":{"d":"M25.4,87.99 L 0 87.99 12.7 65.99 z"},"n":"svg"},{"t":"path","p":{"d":"M38.1,65.99 L 12.7 65.99 25.4 43.99 z"},"n":"svg"},{"t":"path","p":{"d":"M76.2,43.99 L 50.8 43.99 63.5 22 z"},"n":"svg"},{"t":"path","p":{"d":"M50.8,43.99 L 25.4 43.99 38.1 22 z"},"n":"svg"},{"t":"path","p":{"d":"M63.5,22 L 38.1 22 50.8 0 z"},"n":"svg"}],"n":"svg"}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Content: Plots"}]}]},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"using Gadfly\n\nplot([sin, cos], 0, 25)\n#plot(z=(x,y) -\> x*exp(-(x-int(x))^2-y^2),\n#     x=linspace(-8,8,150), y=linspace(-2,2,150), Geom.contour)\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"277675515975592083220871782838023686236"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-103689580107536154182023226013981678806"},"c":[{"t":"div","p":{"className":"graphic-wrap"},"c":[{"t":"svg","p":{"viewBox":"0 0 101.6 87.98818102449896","stroke-width":"0.3","width":"101.6mm","font-size":"3.88","height":"87.98818102449896mm","stroke":"none","fill":"#000000"},"c":[{"t":"g","p":{"class":"plotroot xscalable yscalable"},"c":[{"t":"g","p":{"stroke-opacity":0.0,"fill-opacity":1.0,"font-size":3.880555555555555,"font-family":"'PT Sans','Helvetica Neue','Helvetica',sans-serif","fill":"#564A55","stroke":"#000000"},"c":[{"t":"text","p":{"y":76.37651435783229,"x":53.75416666666667,"text-anchor":"middle"},"c":[{"txt":"x"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"fill-opacity":1.0,"font-size":2.822222222222222,"font-family":"'PT Sans Caption','Helvetica Neue','Helvetica',sans-serif","class":"guide xlabels","fill":"#6C606B"},"c":[{"t":"text","p":{"y":69.70318102449896,"x":21.745000000000005,"text-anchor":"middle"},"c":[{"txt":"0"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":34.54866666666667,"text-anchor":"middle"},"c":[{"txt":"5"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":47.352333333333334,"text-anchor":"middle"},"c":[{"txt":"10"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":60.156,"text-anchor":"middle"},"c":[{"txt":"15"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":72.95966666666666,"text-anchor":"middle"},"c":[{"txt":"20"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":85.76333333333334,"text-anchor":"middle"},"c":[{"txt":"25"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"class":"guide colorkey"},"c":[{"t":"g","p":{"fill-opacity":1.0,"font-size":2.822222222222222,"font-family":"'PT Sans','Helvetica Neue','Helvetica',sans-serif","fill":"#4C404B"},"c":[{"t":"text","p":{"y":36.85159051224948,"dy":"0.35em","x":92.23333333333332},"c":[{"txt":"f"},{"t":"tspan","p":{"style":{"dominant-baseline":"inherit"},"font-size":"83%","dy":"0.6em"},"c":[{"txt":"1"}],"n":"svg"},{"t":"tspan","p":{"dy":"-0.49799999999999994em"},"n":"svg"}],"n":"svg"},{"t":"text","p":{"y":41.791590512249485,"dy":"0.35em","x":92.23333333333332},"c":[{"txt":"f"},{"t":"tspan","p":{"style":{"dominant-baseline":"inherit"},"font-size":"83%","dy":"0.6em"},"c":[{"txt":"2"}],"n":"svg"},{"t":"tspan","p":{"dy":"-0.49799999999999994em"},"n":"svg"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":0.0,"stroke":"#000000"},"c":[{"t":"rect","p":{"y":35.61659051224948,"width":2.47,"fill-opacity":1.0,"x":88.76333333333332,"height":2.47,"fill":"#00BFFF"},"n":"svg"},{"t":"rect","p":{"y":40.556590512249485,"width":2.47,"fill-opacity":1.0,"x":88.76333333333332,"height":2.47,"fill":"#D4CA3A"},"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":0.0,"fill-opacity":1.0,"font-size":3.880555555555555,"font-family":"'PT Sans','Helvetica Neue','Helvetica',sans-serif","fill":"#362A35","stroke":"#000000"},"c":[{"t":"text","p":{"y":31.717423845582815,"x":88.76333333333332},"c":[{"txt":"Color"}],"n":"svg"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"clip-path":"url(#clippath-1)"},"c":[{"t":"g","p":{"stroke-opacity":0.0,"opacity":1.0,"fill-opacity":0.0,"fill":"#000000","stroke":"#000000","class":"guide background"},"c":[{"t":"rect","p":{"y":5.0,"width":68.01833333333333,"x":19.745000000000005,"height":63.70318102449896},"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":1.0,"stroke-width":0.2,"stroke-dasharray":"0.5,0.5","class":"guide ygridlines xfixed","stroke":"#D0D0E0"},"c":[{"t":"path","p":{"fill":"none","d":"M19.75,66.7 L 87.76 66.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M19.75,51.78 L 87.76 51.78"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M19.75,36.85 L 87.76 36.85"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M19.75,21.93 L 87.76 21.93"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M19.75,7 L 87.76 7"},"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":1.0,"stroke-width":0.2,"stroke-dasharray":"0.5,0.5","class":"guide xgridlines yfixed","stroke":"#D0D0E0"},"c":[{"t":"path","p":{"fill":"none","d":"M21.75,5 L 21.75 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M34.55,5 L 34.55 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M47.35,5 L 47.35 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M60.16,5 L 60.16 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M72.96,5 L 72.96 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M85.76,5 L 85.76 68.7"},"n":"svg"}],"n":"svg"},{"t":"g","p":{"class":"plotpanel"},"c":[{"t":"g","p":{"stroke-width":0.3,"fill-opacity":0.0,"stroke-dasharray":"none","fill":"#000000"},"c":[{"t":"path","p":{"stroke-opacity":1.0,"fill":"none","class":"geometry color_f1","d":"M21.75,36.85 L 22 33.86 22.26 30.9 22.52 28 22.77 25.18 23.03 22.49 23.29 19.94 23.54 17.56 23.8 15.37 24.06 13.4 24.32 11.67 24.57 10.19 24.83 8.98 25.09 8.05 25.34 7.41 25.6 7.06 25.86 7.02 26.12 7.28 26.37 7.83 26.63 8.68 26.89 9.81 27.14 11.21 27.4 12.87 27.66 14.78 27.92 16.9 28.17 19.23 28.43 21.73 28.69 24.39 28.94 27.17 29.2 30.05 29.46 33 29.72 35.98 29.97 38.98 30.23 41.95 30.49 44.87 30.74 47.71 31 50.45 31.26 53.04 31.51 55.47 31.77 57.72 32.03 59.75 32.29 61.56 32.54 63.11 32.8 64.4 33.06 65.42 33.31 66.14 33.57 66.57 33.83 66.7 34.09 66.53 34.34 66.06 34.6 65.3 34.86 64.25 35.11 62.93 35.37 61.34 35.63 59.5 35.89 57.44 36.14 55.17 36.4 52.72 36.66 50.1 36.91 47.35 37.17 44.5 37.43 41.57 37.69 38.59 37.94 35.59 38.2 32.61 38.46 29.67 38.71 26.8 38.97 24.04 39.23 21.4 39.49 18.92 39.74 16.61 40 14.52 40.26 12.64 40.51 11.02 40.77 9.65 41.03 8.55 41.28 7.74 41.54 7.23 41.8 7.01 42.06 7.09 42.31 7.47 42.57 8.15 42.83 9.12 43.08 10.36 43.34 11.88 43.6 13.64 43.86 15.64 44.11 17.85 44.37 20.26 44.63 22.83 44.88 25.54 45.14 28.37 45.4 31.28 45.66 34.25 45.91 37.24 46.17 40.23 46.43 43.18 46.68 46.08 46.94 48.88 47.2 51.55 47.46 54.08 47.71 56.44 47.97 58.6 48.23 60.54 48.48 62.24 48.74 63.69 49 64.86 49.25 65.76 49.51 66.36 49.77 66.66 50.03 66.67 50.28 66.37 50.54 65.78 50.8 64.9 51.05 63.73 51.31 62.29 51.57 60.6 51.83 58.66 52.08 56.51 52.34 54.16 52.6 51.64 52.85 48.96 53.11 46.17 53.37 43.28 53.63 40.32 53.88 37.33 54.14 34.34 54.4 31.37 54.65 28.46 54.91 25.63 55.17 22.91 55.43 20.34 55.68 17.93 55.94 15.71 56.2 13.7 56.45 11.93 56.71 10.41 56.97 9.15 57.23 8.18 57.48 7.49 57.74 7.1 58 7.01 58.25 7.21 58.51 7.72 58.77 8.52 59.02 9.61 59.28 10.97 59.54 12.59 59.8 14.45 60.05 16.54 60.31 18.84 60.57 21.32 60.82 23.95 61.08 26.71 61.34 29.58 61.6 32.52 61.85 35.5 62.11 38.5 62.37 41.47 62.62 44.41 62.88 47.26 63.14 50.02 63.4 52.63 63.65 55.1 63.91 57.37 64.17 59.44 64.42 61.28 64.68 62.88 64.94 64.21 65.2 65.27 65.45 66.04 65.71 66.52 65.97 66.7 66.22 66.58 66.48 66.16 66.74 65.44 66.99 64.44 67.25 63.16 67.51 61.61 67.77 59.81 68.02 57.79 68.28 55.55 68.54 53.12 68.79 50.53 69.05 47.8 69.31 44.97 69.57 42.04 69.82 39.07 70.08 36.08 70.34 33.09 70.59 30.14 70.85 27.26 71.11 24.47 71.37 21.81 71.62 19.3 71.88 16.97 72.14 14.84 72.39 12.93 72.65 11.26 72.91 9.85 73.17 8.71 73.42 7.85 73.68 7.29 73.94 7.02 74.19 7.06 74.45 7.39 74.71 8.02 74.97 8.94 75.22 10.15 75.48 11.62 75.74 13.34 75.99 15.3 76.25 17.48 76.51 19.86 76.76 22.4 77.02 25.09 77.28 27.9 77.54 30.8 77.79 33.76 78.05 36.76 78.31 39.75 78.56 42.71 78.82 45.62 79.08 48.43 79.34 51.13 79.59 53.69 79.85 56.07 80.11 58.27 80.36 60.24 80.62 61.98 80.88 63.47 81.14 64.69 81.39 65.63 81.65 66.28 81.91 66.63 82.16 66.69 82.42 66.44 82.68 65.89 82.94 65.06 83.19 63.94 83.45 62.54 83.71 60.89 83.96 58.99 84.22 56.87 84.48 54.55 84.73 52.05 84.99 49.4 85.25 46.62 85.51 43.75 85.76 40.8","stroke":"#00BFFF"},"n":"svg"},{"t":"path","p":{"stroke-opacity":1.0,"fill":"none","class":"geometry color_f2","d":"M21.75,7 L 22 7.15 22.26 7.6 22.52 8.34 22.77 9.38 23.03 10.68 23.29 12.25 23.54 14.07 23.8 16.12 24.06 18.38 24.32 20.82 24.57 23.43 24.83 26.17 25.09 29.02 25.34 31.94 25.6 34.92 25.86 37.91 26.12 40.9 26.37 43.84 26.63 46.72 26.89 49.49 27.14 52.14 27.4 54.63 27.66 56.95 27.92 59.06 28.17 60.95 28.43 62.59 28.69 63.98 28.94 65.09 29.2 65.92 29.46 66.45 29.72 66.69 29.97 66.63 30.23 66.26 30.49 65.61 30.74 64.66 31 63.43 31.26 61.93 31.51 60.18 31.77 58.2 32.03 56 32.29 53.61 32.54 51.05 32.8 48.34 33.06 45.52 33.31 42.62 33.57 39.65 33.83 36.66 34.09 33.67 34.34 30.71 34.6 27.81 34.86 25 35.11 22.32 35.37 19.78 35.63 17.41 35.89 15.24 36.14 13.28 36.4 11.56 36.66 10.1 36.91 8.91 37.17 8 37.43 7.38 37.69 7.05 37.94 7.03 38.2 7.3 38.46 7.88 38.71 8.74 38.97 9.89 39.23 11.31 39.49 12.99 39.74 14.91 40 17.05 40.26 19.38 40.51 21.9 40.77 24.56 41.03 27.35 41.28 30.24 41.54 33.19 41.8 36.18 42.06 39.17 42.31 42.14 42.57 45.06 42.83 47.9 43.08 50.62 43.34 53.2 43.6 55.63 43.86 57.86 44.11 59.88 44.37 61.67 44.63 63.2 44.88 64.48 45.14 65.47 45.4 66.18 45.66 66.59 45.91 66.7 46.17 66.51 46.43 66.02 46.68 65.24 46.94 64.17 47.2 62.83 47.46 61.23 47.71 59.38 47.97 57.3 48.23 55.02 48.48 52.55 48.74 49.93 49 47.17 49.25 44.31 49.51 41.38 49.77 38.4 50.03 35.4 50.28 32.42 50.54 29.48 50.8 26.62 51.05 23.86 51.31 21.23 51.57 18.76 51.83 16.47 52.08 14.39 52.34 12.53 52.6 10.92 52.85 9.57 53.11 8.49 53.37 7.7 53.63 7.2 53.88 7 54.14 7.11 54.4 7.51 54.65 8.2 54.91 9.19 55.17 10.45 55.43 11.98 55.68 13.76 55.94 15.78 56.2 18 56.45 20.42 56.71 23 56.97 25.72 57.23 28.55 57.48 31.47 57.74 34.44 58 37.43 58.25 40.42 58.51 43.37 58.77 46.26 59.02 49.05 59.28 51.72 59.54 54.24 59.8 56.59 60.05 58.73 60.31 60.66 60.57 62.34 60.82 63.77 61.08 64.93 61.34 65.8 61.6 66.39 61.85 66.67 62.11 66.66 62.37 66.34 62.62 65.73 62.88 64.83 63.14 63.64 63.4 62.19 63.65 60.48 63.91 58.53 64.17 56.37 64.42 54 64.68 51.47 64.94 48.79 65.2 45.98 65.45 43.09 65.71 40.13 65.97 37.14 66.22 34.15 66.48 31.18 66.74 28.27 66.99 25.45 67.25 22.74 67.51 20.18 67.77 17.78 68.02 15.57 68.28 13.58 68.54 11.82 68.79 10.32 69.05 9.08 69.31 8.12 69.57 7.46 69.82 7.08 70.08 7.01 70.34 7.24 70.59 7.76 70.85 8.58 71.11 9.69 71.37 11.06 71.62 12.7 71.88 14.58 72.14 16.69 72.39 18.99 72.65 21.48 72.91 24.12 73.17 26.9 73.42 29.77 73.68 32.71 73.94 35.69 74.19 38.69 74.45 41.67 74.71 44.59 74.97 47.45 75.22 50.19 75.48 52.8 75.74 55.25 75.99 57.51 76.25 59.57 76.51 61.39 76.76 62.97 77.02 64.29 77.28 65.33 77.54 66.08 77.79 66.54 78.05 66.7 78.31 66.56 78.56 66.12 78.82 65.39 79.08 64.37 79.34 63.07 79.59 61.5 79.85 59.69 80.11 57.65 80.36 55.4 80.62 52.96 80.88 50.36 81.14 47.62 81.39 44.78 81.65 41.85 81.91 38.88 82.16 35.88 82.42 32.9 82.68 29.95 82.94 27.08 83.19 24.3 83.45 21.65 83.71 19.15 83.96 16.83 84.22 14.71 84.48 12.81 84.73 11.16 84.99 9.77 85.25 8.65 85.51 7.81 85.76 7.26","stroke":"#D4CA3A"},"n":"svg"}],"n":"svg"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"fill-opacity":1.0,"font-size":2.822222222222222,"font-family":"'PT Sans Caption','Helvetica Neue','Helvetica',sans-serif","class":"guide ylabels","fill":"#6C606B"},"c":[{"t":"text","p":{"y":66.70318102449896,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"-1.0"}],"n":"svg"},{"t":"text","p":{"y":51.777385768374224,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"-0.5"}],"n":"svg"},{"t":"text","p":{"y":36.85159051224948,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"0.0"}],"n":"svg"},{"t":"text","p":{"y":21.925795256124744,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"0.5"}],"n":"svg"},{"t":"text","p":{"y":7.0000000000000036,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"1.0"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":0.0,"fill-opacity":1.0,"font-size":3.880555555555555,"font-family":"'PT Sans','Helvetica Neue','Helvetica',sans-serif","fill":"#564A55","stroke":"#000000"},"c":[{"t":"text","p":{"y":34.85159051224948,"transform":"rotate(-90.0 8.81 36.85)","dy":"0.35em","x":8.805833333333332,"text-anchor":"middle"},"c":[{"txt":"f(x)"}],"n":"svg"}],"n":"svg"}],"n":"svg"},{"t":"defs","c":[{"t":"clipPath","p":{"id":"clippath-1"},"c":[{"t":"path","p":{"d":"M19.75,5 L 87.76 5 87.76 68.7 19.75 68.7"},"n":"svg"}],"n":"svg"}],"n":"svg"}],"n":"svg"}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-1 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Abstraction 2"}]}]},{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"TeX-style Layouts"}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"pack-across-center flow horizontal "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Layouts"}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"span","p":{"style":{"fontSize":"1.5em"}},"c":[{"txt":""}]}]},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"# using Colors\ncolors = colormap(\"reds\", 7)\n\nbox1 = container(10em, 10em) |\>\n         fillcolor(colors[3])\nbox2 = container(5em, 5em) |\>\n         fillcolor(colors[5])\n\nvbox(box1, box2)\n#boxes = [container(i*em, i*em) |\>\n#    fillcolor(colors[i])\n#       for i=1:7]\n\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"272672833603158179439997273948660675401"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-96024518342036249127844006975787835374"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"style":{"height":"10.0em","backgroundColor":"#FFB1A5","width":"10.0em"}}},{"t":"div","p":{"style":{"height":"5.0em","backgroundColor":"#FD493E","width":"5.0em"}}}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"pack-across-center flow horizontal "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Layouts: padding and inset"}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"span","p":{"style":{"fontSize":"1.5em"}},"c":[{"txt":""}]}]},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"x = Escher.pad(1em, box1)\n\n#\n# inset(offset(middle, 5em, 4em), container(10em, 10em) |\> fillcolor(\"tomato\"), x)\n#\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"2212905397489655209990042677386893577"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-320939976397538133230066711823478542089"},"c":[{"t":"div","p":{"style":{"padding":"1.0em"}},"c":[{"t":"div","p":{"style":{"height":"10.0em","backgroundColor":"#FFB1A5","width":"10.0em"}}}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"style":{"lineHeight":"2.0em","fontSize":"1.5em"},"className":"flow vertical "},"c":[{"t":"div","p":{"style":{"maxWidth":"30.0em"},"className":"flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"[CSS] is so complex that it has never been implemented correctly; yet, successive versions specify even more complexity. At the same time, it is so underpowered that many elementary graphic designs are impossible or prohibitively difficult, and context-sensitivity (or anything computational) must be addressed externally. Most CSS lore is dedicated to describing the tangles of brittle hacks needed to circumvent incompatibilities or approximate a desired appearance."}]}]},{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"–"}]},{"t":"span","c":[{"txt":" Bret Victor "}]},{"t":"em","p":{"className":"emph "},"c":[{"txt":"MagicInk"}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"style":{"lineHeight":"2.0em","fontSize":"1.5em"},"className":"flow vertical "},"c":[{"t":"div","p":{"style":{"maxWidth":"30.0em"},"className":"flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"One cause of the CSS mess is the eschewing of elegant, flexible abstractions for “1000 special cases,” a detrimental approach which precludes simplicity and generality in any domain. However, the larger and more germane fault is the language’s attempt to serve as both "}]},{"t":"em","p":{"className":"emph "},"c":[{"txt":"tool"}]},{"t":"span","c":[{"txt":" and "}]},{"t":"em","p":{"className":"emph "},"c":[{"txt":"platform"}]},{"t":"span","c":[{"txt":", thereby succeeding as neither."}]}]}]},{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"–"}]},{"t":"span","c":[{"txt":" Bret Victor "}]},{"t":"em","p":{"className":"emph "},"c":[{"txt":"MagicInk"}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"pack-across-center flow horizontal "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Layout 2"}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"span","p":{"style":{"fontSize":"1.5em"}},"c":[{"txt":""}]}]},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"t = tabs([\n    hbox(icon(\"star-half\"), hskip(1em), \"Vector graphics\"),\n    hbox(icon(\"trending-up\"), hskip(1em), \"Plots\"),\n])\np = pages([\n   sierpinski(2),\n   plot([sin, cos], 0, 25),\n])\n\nt, p = wire(t, p, :tabs, :selected)\nvbox(t, p)\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"164558575674504982233359164472127926819"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-114002829602476637203635583595134342947"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"paper-tabs","p":{"attributes":{"selected":0}},"c":[{"t":"paper-tab","c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"iron-icon","p":{"attributes":{"icon":"star-half"}}},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"span","c":[{"txt":"Vector graphics"}]}]}]},{"t":"paper-tab","c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"iron-icon","p":{"attributes":{"icon":"trending-up"}}},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"span","c":[{"txt":"Plots"}]}]}]},{"t":"selectable-behavior","p":{"attributes":{"multi":null,"selector":"::parent"}},"c":[{"t":"chan-send","p":{"attributes":{"chan":"tabs"}}}]}]},{"t":"iron-pages","p":{"attributes":{"selected":0}},"c":[{"t":"div","c":[{"t":"div","p":{"className":"graphic-wrap"},"c":[{"t":"svg","p":{"viewBox":"0 0 101.6 87.98818102449896","stroke-width":"0.3","width":"101.6mm","font-size":"3.88","height":"87.98818102449896mm","stroke":"none","fill":"#000000"},"c":[{"t":"path","p":{"d":"M101.6,87.99 L 76.2 87.99 88.9 65.99 z"},"n":"svg"},{"t":"path","p":{"d":"M76.2,87.99 L 50.8 87.99 63.5 65.99 z"},"n":"svg"},{"t":"path","p":{"d":"M88.9,65.99 L 63.5 65.99 76.2 43.99 z"},"n":"svg"},{"t":"path","p":{"d":"M50.8,87.99 L 25.4 87.99 38.1 65.99 z"},"n":"svg"},{"t":"path","p":{"d":"M25.4,87.99 L 0 87.99 12.7 65.99 z"},"n":"svg"},{"t":"path","p":{"d":"M38.1,65.99 L 12.7 65.99 25.4 43.99 z"},"n":"svg"},{"t":"path","p":{"d":"M76.2,43.99 L 50.8 43.99 63.5 22 z"},"n":"svg"},{"t":"path","p":{"d":"M50.8,43.99 L 25.4 43.99 38.1 22 z"},"n":"svg"},{"t":"path","p":{"d":"M63.5,22 L 38.1 22 50.8 0 z"},"n":"svg"}],"n":"svg"}]}]},{"t":"div","c":[{"t":"div","p":{"className":"graphic-wrap"},"c":[{"t":"svg","p":{"viewBox":"0 0 101.6 87.98818102449896","stroke-width":"0.3","width":"101.6mm","font-size":"3.88","height":"87.98818102449896mm","stroke":"none","fill":"#000000"},"c":[{"t":"g","p":{"class":"plotroot xscalable yscalable"},"c":[{"t":"g","p":{"stroke-opacity":0.0,"fill-opacity":1.0,"font-size":3.880555555555555,"font-family":"'PT Sans','Helvetica Neue','Helvetica',sans-serif","fill":"#564A55","stroke":"#000000"},"c":[{"t":"text","p":{"y":76.37651435783229,"x":53.75416666666667,"text-anchor":"middle"},"c":[{"txt":"x"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"fill-opacity":1.0,"font-size":2.822222222222222,"font-family":"'PT Sans Caption','Helvetica Neue','Helvetica',sans-serif","class":"guide xlabels","fill":"#6C606B"},"c":[{"t":"text","p":{"y":69.70318102449896,"x":21.745000000000005,"text-anchor":"middle"},"c":[{"txt":"0"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":34.54866666666667,"text-anchor":"middle"},"c":[{"txt":"5"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":47.352333333333334,"text-anchor":"middle"},"c":[{"txt":"10"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":60.156,"text-anchor":"middle"},"c":[{"txt":"15"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":72.95966666666666,"text-anchor":"middle"},"c":[{"txt":"20"}],"n":"svg"},{"t":"text","p":{"y":69.70318102449896,"x":85.76333333333334,"text-anchor":"middle"},"c":[{"txt":"25"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"class":"guide colorkey"},"c":[{"t":"g","p":{"fill-opacity":1.0,"font-size":2.822222222222222,"font-family":"'PT Sans','Helvetica Neue','Helvetica',sans-serif","fill":"#4C404B"},"c":[{"t":"text","p":{"y":36.85159051224948,"dy":"0.35em","x":92.23333333333332},"c":[{"txt":"f"},{"t":"tspan","p":{"style":{"dominant-baseline":"inherit"},"font-size":"83%","dy":"0.6em"},"c":[{"txt":"1"}],"n":"svg"},{"t":"tspan","p":{"dy":"-0.49799999999999994em"},"n":"svg"}],"n":"svg"},{"t":"text","p":{"y":41.791590512249485,"dy":"0.35em","x":92.23333333333332},"c":[{"txt":"f"},{"t":"tspan","p":{"style":{"dominant-baseline":"inherit"},"font-size":"83%","dy":"0.6em"},"c":[{"txt":"2"}],"n":"svg"},{"t":"tspan","p":{"dy":"-0.49799999999999994em"},"n":"svg"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":0.0,"stroke":"#000000"},"c":[{"t":"rect","p":{"y":35.61659051224948,"width":2.47,"fill-opacity":1.0,"x":88.76333333333332,"height":2.47,"fill":"#00BFFF"},"n":"svg"},{"t":"rect","p":{"y":40.556590512249485,"width":2.47,"fill-opacity":1.0,"x":88.76333333333332,"height":2.47,"fill":"#D4CA3A"},"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":0.0,"fill-opacity":1.0,"font-size":3.880555555555555,"font-family":"'PT Sans','Helvetica Neue','Helvetica',sans-serif","fill":"#362A35","stroke":"#000000"},"c":[{"t":"text","p":{"y":31.717423845582815,"x":88.76333333333332},"c":[{"txt":"Color"}],"n":"svg"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"clip-path":"url(#clippath-1)"},"c":[{"t":"g","p":{"stroke-opacity":0.0,"opacity":1.0,"fill-opacity":0.0,"fill":"#000000","stroke":"#000000","class":"guide background"},"c":[{"t":"rect","p":{"y":5.0,"width":68.01833333333333,"x":19.745000000000005,"height":63.70318102449896},"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":1.0,"stroke-width":0.2,"stroke-dasharray":"0.5,0.5","class":"guide ygridlines xfixed","stroke":"#D0D0E0"},"c":[{"t":"path","p":{"fill":"none","d":"M19.75,66.7 L 87.76 66.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M19.75,51.78 L 87.76 51.78"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M19.75,36.85 L 87.76 36.85"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M19.75,21.93 L 87.76 21.93"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M19.75,7 L 87.76 7"},"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":1.0,"stroke-width":0.2,"stroke-dasharray":"0.5,0.5","class":"guide xgridlines yfixed","stroke":"#D0D0E0"},"c":[{"t":"path","p":{"fill":"none","d":"M21.75,5 L 21.75 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M34.55,5 L 34.55 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M47.35,5 L 47.35 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M60.16,5 L 60.16 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M72.96,5 L 72.96 68.7"},"n":"svg"},{"t":"path","p":{"fill":"none","d":"M85.76,5 L 85.76 68.7"},"n":"svg"}],"n":"svg"},{"t":"g","p":{"class":"plotpanel"},"c":[{"t":"g","p":{"stroke-width":0.3,"fill-opacity":0.0,"stroke-dasharray":"none","fill":"#000000"},"c":[{"t":"path","p":{"stroke-opacity":1.0,"fill":"none","class":"geometry color_f1","d":"M21.75,36.85 L 22 33.86 22.26 30.9 22.52 28 22.77 25.18 23.03 22.49 23.29 19.94 23.54 17.56 23.8 15.37 24.06 13.4 24.32 11.67 24.57 10.19 24.83 8.98 25.09 8.05 25.34 7.41 25.6 7.06 25.86 7.02 26.12 7.28 26.37 7.83 26.63 8.68 26.89 9.81 27.14 11.21 27.4 12.87 27.66 14.78 27.92 16.9 28.17 19.23 28.43 21.73 28.69 24.39 28.94 27.17 29.2 30.05 29.46 33 29.72 35.98 29.97 38.98 30.23 41.95 30.49 44.87 30.74 47.71 31 50.45 31.26 53.04 31.51 55.47 31.77 57.72 32.03 59.75 32.29 61.56 32.54 63.11 32.8 64.4 33.06 65.42 33.31 66.14 33.57 66.57 33.83 66.7 34.09 66.53 34.34 66.06 34.6 65.3 34.86 64.25 35.11 62.93 35.37 61.34 35.63 59.5 35.89 57.44 36.14 55.17 36.4 52.72 36.66 50.1 36.91 47.35 37.17 44.5 37.43 41.57 37.69 38.59 37.94 35.59 38.2 32.61 38.46 29.67 38.71 26.8 38.97 24.04 39.23 21.4 39.49 18.92 39.74 16.61 40 14.52 40.26 12.64 40.51 11.02 40.77 9.65 41.03 8.55 41.28 7.74 41.54 7.23 41.8 7.01 42.06 7.09 42.31 7.47 42.57 8.15 42.83 9.12 43.08 10.36 43.34 11.88 43.6 13.64 43.86 15.64 44.11 17.85 44.37 20.26 44.63 22.83 44.88 25.54 45.14 28.37 45.4 31.28 45.66 34.25 45.91 37.24 46.17 40.23 46.43 43.18 46.68 46.08 46.94 48.88 47.2 51.55 47.46 54.08 47.71 56.44 47.97 58.6 48.23 60.54 48.48 62.24 48.74 63.69 49 64.86 49.25 65.76 49.51 66.36 49.77 66.66 50.03 66.67 50.28 66.37 50.54 65.78 50.8 64.9 51.05 63.73 51.31 62.29 51.57 60.6 51.83 58.66 52.08 56.51 52.34 54.16 52.6 51.64 52.85 48.96 53.11 46.17 53.37 43.28 53.63 40.32 53.88 37.33 54.14 34.34 54.4 31.37 54.65 28.46 54.91 25.63 55.17 22.91 55.43 20.34 55.68 17.93 55.94 15.71 56.2 13.7 56.45 11.93 56.71 10.41 56.97 9.15 57.23 8.18 57.48 7.49 57.74 7.1 58 7.01 58.25 7.21 58.51 7.72 58.77 8.52 59.02 9.61 59.28 10.97 59.54 12.59 59.8 14.45 60.05 16.54 60.31 18.84 60.57 21.32 60.82 23.95 61.08 26.71 61.34 29.58 61.6 32.52 61.85 35.5 62.11 38.5 62.37 41.47 62.62 44.41 62.88 47.26 63.14 50.02 63.4 52.63 63.65 55.1 63.91 57.37 64.17 59.44 64.42 61.28 64.68 62.88 64.94 64.21 65.2 65.27 65.45 66.04 65.71 66.52 65.97 66.7 66.22 66.58 66.48 66.16 66.74 65.44 66.99 64.44 67.25 63.16 67.51 61.61 67.77 59.81 68.02 57.79 68.28 55.55 68.54 53.12 68.79 50.53 69.05 47.8 69.31 44.97 69.57 42.04 69.82 39.07 70.08 36.08 70.34 33.09 70.59 30.14 70.85 27.26 71.11 24.47 71.37 21.81 71.62 19.3 71.88 16.97 72.14 14.84 72.39 12.93 72.65 11.26 72.91 9.85 73.17 8.71 73.42 7.85 73.68 7.29 73.94 7.02 74.19 7.06 74.45 7.39 74.71 8.02 74.97 8.94 75.22 10.15 75.48 11.62 75.74 13.34 75.99 15.3 76.25 17.48 76.51 19.86 76.76 22.4 77.02 25.09 77.28 27.9 77.54 30.8 77.79 33.76 78.05 36.76 78.31 39.75 78.56 42.71 78.82 45.62 79.08 48.43 79.34 51.13 79.59 53.69 79.85 56.07 80.11 58.27 80.36 60.24 80.62 61.98 80.88 63.47 81.14 64.69 81.39 65.63 81.65 66.28 81.91 66.63 82.16 66.69 82.42 66.44 82.68 65.89 82.94 65.06 83.19 63.94 83.45 62.54 83.71 60.89 83.96 58.99 84.22 56.87 84.48 54.55 84.73 52.05 84.99 49.4 85.25 46.62 85.51 43.75 85.76 40.8","stroke":"#00BFFF"},"n":"svg"},{"t":"path","p":{"stroke-opacity":1.0,"fill":"none","class":"geometry color_f2","d":"M21.75,7 L 22 7.15 22.26 7.6 22.52 8.34 22.77 9.38 23.03 10.68 23.29 12.25 23.54 14.07 23.8 16.12 24.06 18.38 24.32 20.82 24.57 23.43 24.83 26.17 25.09 29.02 25.34 31.94 25.6 34.92 25.86 37.91 26.12 40.9 26.37 43.84 26.63 46.72 26.89 49.49 27.14 52.14 27.4 54.63 27.66 56.95 27.92 59.06 28.17 60.95 28.43 62.59 28.69 63.98 28.94 65.09 29.2 65.92 29.46 66.45 29.72 66.69 29.97 66.63 30.23 66.26 30.49 65.61 30.74 64.66 31 63.43 31.26 61.93 31.51 60.18 31.77 58.2 32.03 56 32.29 53.61 32.54 51.05 32.8 48.34 33.06 45.52 33.31 42.62 33.57 39.65 33.83 36.66 34.09 33.67 34.34 30.71 34.6 27.81 34.86 25 35.11 22.32 35.37 19.78 35.63 17.41 35.89 15.24 36.14 13.28 36.4 11.56 36.66 10.1 36.91 8.91 37.17 8 37.43 7.38 37.69 7.05 37.94 7.03 38.2 7.3 38.46 7.88 38.71 8.74 38.97 9.89 39.23 11.31 39.49 12.99 39.74 14.91 40 17.05 40.26 19.38 40.51 21.9 40.77 24.56 41.03 27.35 41.28 30.24 41.54 33.19 41.8 36.18 42.06 39.17 42.31 42.14 42.57 45.06 42.83 47.9 43.08 50.62 43.34 53.2 43.6 55.63 43.86 57.86 44.11 59.88 44.37 61.67 44.63 63.2 44.88 64.48 45.14 65.47 45.4 66.18 45.66 66.59 45.91 66.7 46.17 66.51 46.43 66.02 46.68 65.24 46.94 64.17 47.2 62.83 47.46 61.23 47.71 59.38 47.97 57.3 48.23 55.02 48.48 52.55 48.74 49.93 49 47.17 49.25 44.31 49.51 41.38 49.77 38.4 50.03 35.4 50.28 32.42 50.54 29.48 50.8 26.62 51.05 23.86 51.31 21.23 51.57 18.76 51.83 16.47 52.08 14.39 52.34 12.53 52.6 10.92 52.85 9.57 53.11 8.49 53.37 7.7 53.63 7.2 53.88 7 54.14 7.11 54.4 7.51 54.65 8.2 54.91 9.19 55.17 10.45 55.43 11.98 55.68 13.76 55.94 15.78 56.2 18 56.45 20.42 56.71 23 56.97 25.72 57.23 28.55 57.48 31.47 57.74 34.44 58 37.43 58.25 40.42 58.51 43.37 58.77 46.26 59.02 49.05 59.28 51.72 59.54 54.24 59.8 56.59 60.05 58.73 60.31 60.66 60.57 62.34 60.82 63.77 61.08 64.93 61.34 65.8 61.6 66.39 61.85 66.67 62.11 66.66 62.37 66.34 62.62 65.73 62.88 64.83 63.14 63.64 63.4 62.19 63.65 60.48 63.91 58.53 64.17 56.37 64.42 54 64.68 51.47 64.94 48.79 65.2 45.98 65.45 43.09 65.71 40.13 65.97 37.14 66.22 34.15 66.48 31.18 66.74 28.27 66.99 25.45 67.25 22.74 67.51 20.18 67.77 17.78 68.02 15.57 68.28 13.58 68.54 11.82 68.79 10.32 69.05 9.08 69.31 8.12 69.57 7.46 69.82 7.08 70.08 7.01 70.34 7.24 70.59 7.76 70.85 8.58 71.11 9.69 71.37 11.06 71.62 12.7 71.88 14.58 72.14 16.69 72.39 18.99 72.65 21.48 72.91 24.12 73.17 26.9 73.42 29.77 73.68 32.71 73.94 35.69 74.19 38.69 74.45 41.67 74.71 44.59 74.97 47.45 75.22 50.19 75.48 52.8 75.74 55.25 75.99 57.51 76.25 59.57 76.51 61.39 76.76 62.97 77.02 64.29 77.28 65.33 77.54 66.08 77.79 66.54 78.05 66.7 78.31 66.56 78.56 66.12 78.82 65.39 79.08 64.37 79.34 63.07 79.59 61.5 79.85 59.69 80.11 57.65 80.36 55.4 80.62 52.96 80.88 50.36 81.14 47.62 81.39 44.78 81.65 41.85 81.91 38.88 82.16 35.88 82.42 32.9 82.68 29.95 82.94 27.08 83.19 24.3 83.45 21.65 83.71 19.15 83.96 16.83 84.22 14.71 84.48 12.81 84.73 11.16 84.99 9.77 85.25 8.65 85.51 7.81 85.76 7.26","stroke":"#D4CA3A"},"n":"svg"}],"n":"svg"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"fill-opacity":1.0,"font-size":2.822222222222222,"font-family":"'PT Sans Caption','Helvetica Neue','Helvetica',sans-serif","class":"guide ylabels","fill":"#6C606B"},"c":[{"t":"text","p":{"y":66.70318102449896,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"-1.0"}],"n":"svg"},{"t":"text","p":{"y":51.777385768374224,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"-0.5"}],"n":"svg"},{"t":"text","p":{"y":36.85159051224948,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"0.0"}],"n":"svg"},{"t":"text","p":{"y":21.925795256124744,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"0.5"}],"n":"svg"},{"t":"text","p":{"y":7.0000000000000036,"dy":"0.35em","x":18.745,"text-anchor":"end"},"c":[{"txt":"1.0"}],"n":"svg"}],"n":"svg"},{"t":"g","p":{"stroke-opacity":0.0,"fill-opacity":1.0,"font-size":3.880555555555555,"font-family":"'PT Sans','Helvetica Neue','Helvetica',sans-serif","fill":"#564A55","stroke":"#000000"},"c":[{"t":"text","p":{"y":34.85159051224948,"transform":"rotate(-90.0 8.81 36.85)","dy":"0.35em","x":8.805833333333332,"text-anchor":"middle"},"c":[{"txt":"f(x)"}],"n":"svg"}],"n":"svg"}],"n":"svg"},{"t":"defs","c":[{"t":"clipPath","p":{"id":"clippath-1"},"c":[{"t":"path","p":{"d":"M19.75,5 L 87.76 5 87.76 68.7 19.75 68.7"},"n":"svg"}],"n":"svg"}],"n":"svg"}],"n":"svg"}]}]},{"t":"chan-recv","p":{"attributes":{"chan":"tabs","attr":"selected"}}}]}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-1 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Abstraction 3"}]}]},{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Typography"}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"pack-across-center flow horizontal "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"span","p":{"className":"md-paragraph "},"c":[{"txt":"Typography"}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"span","p":{"style":{"fontSize":"1.5em"}},"c":[{"txt":""}]}]},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"\nsamples = vcat(\n   [Escher.title(i, \"Title $i\")\n       for i=1:4],\n   [heading(i, \"Heading $i\")\n       for i=4:-1:1]\n)\n\nvbox(\n    samples\n)\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"144907854221015293573191636794164696503"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-169525581344292128128966744459831580028"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-1 "},"c":[{"txt":"Title 1"}]},{"t":"span","p":{"className":"title-2 "},"c":[{"txt":"Title 2"}]},{"t":"span","p":{"className":"title-3 "},"c":[{"txt":"Title 3"}]},{"t":"span","p":{"className":"title-4 "},"c":[{"txt":"Title 4"}]},{"t":"h1","p":{"className":"heading-4 "},"c":[{"txt":"Heading 4"}]},{"t":"h1","p":{"className":"heading-3 "},"c":[{"txt":"Heading 3"}]},{"t":"h1","p":{"className":"heading-2 "},"c":[{"txt":"Heading 2"}]},{"t":"h1","p":{"className":"heading-1 "},"c":[{"txt":"Heading 1"}]}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"map example: turning "}]},{"t":"code","c":[{"t":"span","c":[{"txt":"Signal"}]}]},{"t":"span","c":[{"txt":" into a signal of UIs"}]}]}]},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"steps = Signal(0)\n\nsteps_slider =\n    subscribe(steps, slider(0:6))\n\nvbox(\n    steps_slider,\n    map(sierpinski, steps),\n)\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"182156259592525625509827732764471794223"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-326112626486221875216366156638975953716"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"paper-slider","p":{"attributes":{"max":6,"value":0,"pin":null,"min":0,"step":1,"disabled":null,"secondaryProgress":0,"editable":true}},"c":[{"t":"watch-states","p":{"triggers":{"value":"change"},"attributes":{"selector":"::parent"}},"c":[{"t":"signal-transport","p":{"signalId":"211295460333436183201405980891546720377"}}]}]},{"t":"signal-container","p":{"signalId":"signal-105628956985963760749941340188736866518"},"c":[{"t":"div","p":{"className":"graphic-wrap"},"c":[{"t":"svg","p":{"viewBox":"0 0 101.6 87.98818102449896","stroke-width":"0.3","width":"101.6mm","font-size":"3.88","height":"87.98818102449896mm","stroke":"none","fill":"#000000"},"c":[{"t":"path","p":{"d":"M101.6,87.99 L 0 87.99 50.8 0 z"},"n":"svg"}],"n":"svg"}]}]}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-2 "},"c":[{"txt":"map example: Animation"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"switch_state = Signal(false)\nswitch = subscribe(switch_state, togglebutton(false))\n\nticks = fpswhen(switch_state, 60)\n\nshowball(x) =\n  compose(context(),\n    circle(.5,\n      .1 + (1-abs(sin(2*time()))) * 0.8,\n      .1\n    ), fill(\"tomato\"))\nvbox(\n    switch,\n    map(showball, ticks),\n)\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"227494013229966964046693191402531631764"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-278766936171469113705715029509879866459"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"paper-toggle-button","p":{"attributes":{"checked":null,"toggles":null,"disabled":null}},"c":[{"t":"watch-states","p":{"triggers":{"checked":"change"},"attributes":{"selector":"::parent"}},"c":[{"t":"signal-transport","p":{"signalId":"307632115027389867765439872305108793805"}}]}]},{"t":"signal-container","p":{"signalId":"signal-293711297672121841659236797244410810872"},"c":[{"t":"div","p":{"className":"graphic-wrap"},"c":[{"t":"svg","p":{"viewBox":"0 0 101.6 87.98818102449896","stroke-width":"0.3","width":"101.6mm","font-size":"3.88","height":"87.98818102449896mm","stroke":"none","fill":"#000000"},"c":[{"t":"g","p":{"fill-opacity":1.0,"fill":"#FF6347"},"c":[{"t":"circle","p":{"r":10.16,"cx":50.8,"cy":10.027833552392837},"n":"svg"}],"n":"svg"}],"n":"svg"}]}]}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"div","p":{"className":"title-2 flow vertical "},"c":[{"t":"div","p":{"className":"md-paragraph "},"c":[{"t":"span","c":[{"txt":"Interpreter example: "}]},{"t":"code","c":[{"t":"span","c":[{"txt":"constant"}]}]}]}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"paper-material","p":{"attributes":{"animated":true,"elevation":2}},"c":[{"t":"div","p":{"style":{"backgroundColor":"#E1E4E8","padding":"1.0em"}},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"div","p":{"style":{"height":"37.0em","width":"27.0em"},"className":"flow vertical "},"c":[{"t":"code-mirror","p":{"attributes":{"value":"delta = Signal(0)\n\ninc = constant(1, button(\"+\")) \>\>\> delta\ndec = constant(-1, button(\"-\")) \>\>\> delta\n\ncount = foldp(+, 0, delta)\n\nhbox(\n    inc,\n    hskip(1em),\n    title(2, count),\n    hskip(1em),\n    dec\n)\n","theme":"elegant","tabindex":0,"mode":"julia","read-only":null,"line-numbers":true}},"c":[{"t":"watch-states","p":{"triggers":{"immediateValue":"change"},"attributes":{"name":"code","index":0,"bubbles":true,"id":"signal-code","selector":"::parent"}}},{"t":"keypress-behavior","p":{"attributes":{"keys":"ctrl+enter shift+enter","name":"submit","index":0,"bubbles":true,"id":"signal-submit"}}},{"t":"signal-sampler","p":{"signals":["code"],"triggers":["submit"]},"c":[{"t":"signal-transport","p":{"signalId":"203503623620469927479914251587627427016"}}]}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"div","p":{"style":{"backgroundColor":"#FFFFFF","padding":"1.0em","borderRadius":"0.5em"}},"c":[{"t":"div","p":{"style":{"height":"25.0em","width":"25.0em"},"className":"flow vertical "},"c":[{"t":"signal-container","p":{"signalId":"signal-166733679898308847769032505806178545641"},"c":[{"t":"div","p":{"className":"flow horizontal "},"c":[{"t":"paper-button","p":{"attributes":{"noink":null,"raised":null,"disabled":null}},"c":[{"t":"span","c":[{"txt":"+"}]},{"t":"clickable-behavior","p":{"attributes":{"buttons":"[1]"}},"c":[{"t":"signal-transport","p":{"signalId":"117273519664649134121264684734295839366"}}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"signal-container","p":{"className":"title-2 ","signalId":"signal-336258190274292899287085355795826412159"},"c":[{"t":"div","c":[{"txt":"0"}]}]},{"t":"div","p":{"style":{"height":"0.0px","width":"1.0em"}}},{"t":"paper-button","p":{"attributes":{"noink":null,"raised":null,"disabled":null}},"c":[{"t":"span","c":[{"txt":"-"}]},{"t":"clickable-behavior","p":{"attributes":{"buttons":"[1]"}},"c":[{"t":"signal-transport","p":{"signalId":"169363179390777580154936241650262712579"}}]}]}]}]}]}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-3 "},"c":[{"txt":"Thanks for the inspiration, and code!"}]},{"t":"div","p":{"style":{"lineHeight":"2.0em","fontSize":"2.0em"},"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"Elm"}]}]},{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"virtual-dom"}]}]},{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"Polymer"}]}]},{"t":"li","c":[{"t":"ka-tex","p":{"className":"md-list-item ","attributes":{"source":"\\KaTeX","block":null}}}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-3 "},"c":[{"txt":"Thanks for the inspiration, and code!"}]},{"t":"div","p":{"style":{"lineHeight":"2.0em","fontSize":"2.0em"},"className":"flow vertical "},"c":[{"t":"ul","p":{"className":"md-list "},"c":[{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"Compose, Gadfly"}]}]},{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"Images"}]}]},{"t":"li","c":[{"t":"span","p":{"className":"md-list-item "},"c":[{"txt":"SymPy"}]}]}]}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-3 "},"c":[{"txt":"Thank you!"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"span","p":{"className":"title-2 "},"c":[{"txt":"https://shashi.github.io/Escher.jl"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"span","p":{"className":"title-1 "},"c":[{"txt":"or just google Escher.jl"}]}]}]},{"t":"slide-tile","p":{"inTransitions":"slide-from-right cross-fade-all"},"c":[{"t":"div","p":{"className":"flow vertical "},"c":[{"t":"span","p":{"className":"title-3 "},"c":[{"txt":"Next steps"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"span","p":{"className":"title-1 "},"c":[{"txt":"Drastic Simplification - WebDisplay"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}},{"t":"span","p":{"className":"title-1 "},"c":[{"txt":"Make it work everywhere"}]},{"t":"div","p":{"style":{"height":"1.0em","width":"0.0px"}}}]}]}]})
+    var el = document.querySelector("#spinner")
+    if (el) {
+        el.style.display ="none";
+    }
+});
+</script>
+</body>
+</html>
